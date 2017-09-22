@@ -26,8 +26,8 @@ Controls
 
 .. _imx_api_FIM:
 
-Frame Interval Monitor in ipuX_csiY
------------------------------------
+Frame Interval Monitor
+----------------------
 
 The adv718x decoders can occasionally send corrupt fields during
 NTSC/PAL signal re-sync (too little or too many video lines). When
@@ -46,16 +46,17 @@ and remain at that value until rolling stops.
 While the reason for this observation isn't known (the IPU dummy
 line mechanism should show an increase in the intervals by 1 line
 time every frame, not a fixed value), we can use it to detect the
-corrupt fields using a frame interval monitor. If the FIM detects a
-bad frame interval, the ipuX_csiY subdev will send the event
-V4L2_EVENT_IMX_FRAME_INTERVAL_ERROR. Userland can register with
-the FIM event notification on the ipuX_csiY subdev device node.
-Userland can issue a streaming restart when this event is received
-to correct the rolling/split image.
+corrupt fields using a frame interval monitor. If the subdev that
+is monitoring frame intervals detects a bad frame interval, the subdev
+will send the event V4L2_EVENT_IMX_FRAME_INTERVAL_ERROR. Userland can
+register with the FIM event notification on the subdev device node.
+Userland can issue a streaming restart when this event is received to
+correct the rolling/split image.
 
-The ipuX_csiY subdev includes custom controls to tweak some dials for
-FIM. If one of these controls is changed during streaming, the FIM will
-be reset and will continue at the new settings.
+The subdevs that support frame interval monitoring are: ipuX_csiY at the
+IDMAC source pad, ipuX_ic_prpenc, and ipuX_ic_prpvf. These subdevs
+include custom FIM controls. If one of these controls is changed during
+streaming, the FIM will be reset and will continue at the new settings.
 
 - V4L2_CID_IMX_FIM_ENABLE
 
@@ -84,7 +85,8 @@ latency from high system load.
 How many frames to skip after a FIM reset or stream restart before
 FIM begins to average intervals.
 
-- V4L2_CID_IMX_FIM_ICAP_CHANNEL / V4L2_CID_IMX_FIM_ICAP_EDGE
+- V4L2_CID_IMX_FIM_ICAP_CHANNEL
+- V4L2_CID_IMX_FIM_ICAP_EDGE
 
 These controls will configure an input capture channel as the method
 for measuring frame intervals. This is superior to the default method
