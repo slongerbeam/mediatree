@@ -17,6 +17,7 @@
 #include <linux/timer.h>
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-device.h>
+#include <media/v4l2-event.h>
 #include <media/v4l2-ioctl.h>
 #include <media/v4l2-mc.h>
 #include <media/v4l2-subdev.h>
@@ -54,6 +55,7 @@ struct prp_priv {
 	struct media_pad pad[PRPENCVF_NUM_PADS];
 	/* the video device at output pad */
 	struct imx_media_video_dev *vdev;
+	struct imx_media_fim *fim;
 
 	/* lock to protect all members below */
 	struct mutex lock;
@@ -245,6 +247,11 @@ static irqreturn_t prp_eof_interrupt(int irq, void *dev_id)
 		complete(&priv->last_eof_comp);
 		priv->last_eof = false;
 		goto unlock;
+	}
+
+	if (priv->fim) {
+		/* call frame interval monitor */
+		imx_media_fim_eof_monitor(priv->fim, ktime_get());
 	}
 
 	channel = (ipu_rot_mode_is_irt(priv->rot_mode)) ?
@@ -731,12 +738,22 @@ static int prp_start(struct prp_priv *priv)
 		goto out_free_eof_irq;
 	}
 
+	/* start the frame interval monitor */
+	if (priv->fim) {
+		ret = imx_media_fim_set_stream(priv->fim,
+					       &priv->frame_interval, true);
+		if (ret)
+			goto out_stop_upstream;
+	}
+
 	/* start the EOF timeout timer */
 	mod_timer(&priv->eof_timeout_timer,
 		  jiffies + msecs_to_jiffies(IMX_MEDIA_EOF_TIMEOUT));
 
 	return 0;
 
+out_stop_upstream:
+        v4l2_subdev_call(priv->src_sd, video, s_stream, 0);
 out_free_eof_irq:
 	devm_free_irq(ic_priv->ipu_dev, priv->eof_irq, priv);
 out_free_nfb4eof_irq:
@@ -787,6 +804,10 @@ static void prp_stop(struct prp_priv *priv)
 	del_timer_sync(&priv->eof_timeout_timer);
 
 	prp_put_ipu_resources(priv);
+
+	/* stop the frame interval monitor */
+	if (priv->fim)
+		imx_media_fim_set_stream(priv->fim, NULL, false);
 }
 
 static struct v4l2_mbus_framefmt *
@@ -1160,6 +1181,12 @@ static int prp_init_controls(struct prp_priv *priv)
 		goto out_free;
 	}
 
+	if (priv->fim) {
+		ret = imx_media_fim_add_controls(priv->fim);
+		if (ret)
+			goto out_free;
+	}
+
 	v4l2_ctrl_handler_setup(hdlr);
 	return 0;
 
@@ -1243,6 +1270,23 @@ static int prp_s_frame_interval(struct v4l2_subdev *sd,
 	return 0;
 }
 
+static int prp_subscribe_event(struct v4l2_subdev *sd, struct v4l2_fh *fh,
+			       struct v4l2_event_subscription *sub)
+{
+	if (sub->type != V4L2_EVENT_IMX_FRAME_INTERVAL_ERROR)
+		return -EINVAL;
+	if (sub->id != 0)
+		return -EINVAL;
+
+	return v4l2_event_subscribe(fh, sub, 0, NULL);
+}
+
+static int prp_unsubscribe_event(struct v4l2_subdev *sd, struct v4l2_fh *fh,
+				 struct v4l2_event_subscription *sub)
+{
+	return v4l2_event_unsubscribe(fh, sub);
+}
+
 static int prp_registered(struct v4l2_subdev *sd)
 {
 	struct prp_priv *priv = sd_to_priv(sd);
@@ -1265,11 +1309,17 @@ static int prp_registered(struct v4l2_subdev *sd)
 	priv->frame_interval.numerator = 1;
 	priv->frame_interval.denominator = 30;
 
+	priv->fim = imx_media_fim_init(&ic_priv->sd);
+	if (IS_ERR(priv->fim))
+		return PTR_ERR(priv->fim);
+
 	priv->vdev = imx_media_capture_device_init(ic_priv->ipu_dev,
 						   &ic_priv->sd,
 						   PRPENCVF_SRC_PAD);
-	if (IS_ERR(priv->vdev))
-		return PTR_ERR(priv->vdev);
+	if (IS_ERR(priv->vdev)) {
+		ret = PTR_ERR(priv->vdev);
+		goto free_fim;
+	}
 
 	ret = imx_media_capture_device_register(priv->vdev);
 	if (ret)
@@ -1285,6 +1335,9 @@ unreg_vdev:
 	imx_media_capture_device_unregister(priv->vdev);
 remove_vdev:
 	imx_media_capture_device_remove(priv->vdev);
+free_fim:
+	if (priv->fim)
+		imx_media_fim_free(priv->fim);
 	return ret;
 }
 
@@ -1294,7 +1347,8 @@ static void prp_unregistered(struct v4l2_subdev *sd)
 
 	imx_media_capture_device_unregister(priv->vdev);
 	imx_media_capture_device_remove(priv->vdev);
-
+	if (priv->fim)
+		imx_media_fim_free(priv->fim);
 	v4l2_ctrl_handler_free(&priv->ctrl_hdlr);
 }
 
@@ -1304,6 +1358,11 @@ static const struct v4l2_subdev_pad_ops prp_pad_ops = {
 	.enum_frame_size = prp_enum_frame_size,
 	.get_fmt = prp_get_fmt,
 	.set_fmt = prp_set_fmt,
+};
+
+static const struct v4l2_subdev_core_ops prp_core_ops = {
+	.subscribe_event = prp_subscribe_event,
+	.unsubscribe_event = prp_unsubscribe_event,
 };
 
 static const struct v4l2_subdev_video_ops prp_video_ops = {
@@ -1318,6 +1377,7 @@ static const struct media_entity_operations prp_entity_ops = {
 };
 
 static const struct v4l2_subdev_ops prp_subdev_ops = {
+	.core = &prp_core_ops,
 	.video = &prp_video_ops,
 	.pad = &prp_pad_ops,
 };
