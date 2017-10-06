@@ -58,7 +58,7 @@ struct prp_priv {
 	struct imx_media_fim *fim;
 
 	/* lock to protect all members below */
-	struct mutex lock;
+	struct mutex prpencvf_lock;
 
 	/* IPU units we require */
 	struct ipu_ic *ic;
@@ -886,7 +886,7 @@ static int prp_get_fmt(struct v4l2_subdev *sd,
 	if (sdformat->pad >= PRPENCVF_NUM_PADS)
 		return -EINVAL;
 
-	mutex_lock(&priv->lock);
+	mutex_lock(&priv->prpencvf_lock);
 
 	fmt = __prp_get_fmt(priv, cfg, sdformat->pad, sdformat->which);
 	if (!fmt) {
@@ -896,7 +896,7 @@ static int prp_get_fmt(struct v4l2_subdev *sd,
 
 	sdformat->format = *fmt;
 out:
-	mutex_unlock(&priv->lock);
+	mutex_unlock(&priv->prpencvf_lock);
 	return ret;
 }
 
@@ -955,7 +955,7 @@ static int prp_set_fmt(struct v4l2_subdev *sd,
 	if (sdformat->pad >= PRPENCVF_NUM_PADS)
 		return -EINVAL;
 
-	mutex_lock(&priv->lock);
+	mutex_lock(&priv->prpencvf_lock);
 
 	if (priv->stream_count > 0) {
 		ret = -EBUSY;
@@ -989,7 +989,7 @@ static int prp_set_fmt(struct v4l2_subdev *sd,
 		priv->cc[sdformat->pad] = cc;
 
 out:
-	mutex_unlock(&priv->lock);
+	mutex_unlock(&priv->prpencvf_lock);
 	return ret;
 }
 
@@ -1005,7 +1005,7 @@ static int prp_enum_frame_size(struct v4l2_subdev *sd,
 	if (fse->pad >= PRPENCVF_NUM_PADS || fse->index != 0)
 		return -EINVAL;
 
-	mutex_lock(&priv->lock);
+	mutex_lock(&priv->prpencvf_lock);
 
 	format.pad = fse->pad;
 	format.which = fse->which;
@@ -1028,7 +1028,7 @@ static int prp_enum_frame_size(struct v4l2_subdev *sd,
 	fse->max_width = format.format.width;
 	fse->max_height = format.format.height;
 out:
-	mutex_unlock(&priv->lock);
+	mutex_unlock(&priv->prpencvf_lock);
 	return ret;
 }
 
@@ -1045,7 +1045,7 @@ static int prp_link_setup(struct media_entity *entity,
 	dev_dbg(ic_priv->ipu_dev, "%s: link setup %s -> %s",
 		ic_priv->sd.name, remote->entity->name, local->entity->name);
 
-	mutex_lock(&priv->lock);
+	mutex_lock(&priv->prpencvf_lock);
 
 	if (local->flags & MEDIA_PAD_FL_SINK) {
 		if (!is_media_entity_v4l2_subdev(remote->entity)) {
@@ -1088,7 +1088,7 @@ static int prp_link_setup(struct media_entity *entity,
 
 	priv->sink = remote->entity;
 out:
-	mutex_unlock(&priv->lock);
+	mutex_unlock(&priv->prpencvf_lock);
 	return ret;
 }
 
@@ -1101,7 +1101,7 @@ static int prp_s_ctrl(struct v4l2_ctrl *ctrl)
 	int rotation, ret = 0;
 	bool hflip, vflip;
 
-	mutex_lock(&priv->lock);
+	mutex_lock(&priv->prpencvf_lock);
 
 	rotation = priv->rotation;
 	hflip = priv->hflip;
@@ -1151,7 +1151,7 @@ static int prp_s_ctrl(struct v4l2_ctrl *ctrl)
 	}
 
 out:
-	mutex_unlock(&priv->lock);
+	mutex_unlock(&priv->prpencvf_lock);
 	return ret;
 }
 
@@ -1201,7 +1201,7 @@ static int prp_s_stream(struct v4l2_subdev *sd, int enable)
 	struct prp_priv *priv = ic_priv->task_priv;
 	int ret = 0;
 
-	mutex_lock(&priv->lock);
+	mutex_lock(&priv->prpencvf_lock);
 
 	if (!priv->src_sd || !priv->sink) {
 		ret = -EPIPE;
@@ -1230,7 +1230,7 @@ update_count:
 	if (priv->stream_count < 0)
 		priv->stream_count = 0;
 out:
-	mutex_unlock(&priv->lock);
+	mutex_unlock(&priv->prpencvf_lock);
 	return ret;
 }
 
@@ -1242,9 +1242,9 @@ static int prp_g_frame_interval(struct v4l2_subdev *sd,
 	if (fi->pad >= PRPENCVF_NUM_PADS)
 		return -EINVAL;
 
-	mutex_lock(&priv->lock);
+	mutex_lock(&priv->prpencvf_lock);
 	fi->interval = priv->frame_interval;
-	mutex_unlock(&priv->lock);
+	mutex_unlock(&priv->prpencvf_lock);
 
 	return 0;
 }
@@ -1257,7 +1257,7 @@ static int prp_s_frame_interval(struct v4l2_subdev *sd,
 	if (fi->pad >= PRPENCVF_NUM_PADS)
 		return -EINVAL;
 
-	mutex_lock(&priv->lock);
+	mutex_lock(&priv->prpencvf_lock);
 
 	/* No limits on valid frame intervals */
 	if (fi->interval.numerator == 0 || fi->interval.denominator == 0)
@@ -1265,7 +1265,7 @@ static int prp_s_frame_interval(struct v4l2_subdev *sd,
 	else
 		priv->frame_interval = fi->interval;
 
-	mutex_unlock(&priv->lock);
+	mutex_unlock(&priv->prpencvf_lock);
 
 	return 0;
 }
@@ -1402,7 +1402,7 @@ static int prp_init(struct imx_ic_priv *ic_priv)
 	spin_lock_init(&priv->irqlock);
 	timer_setup(&priv->eof_timeout_timer, prp_eof_timeout, 0);
 
-	mutex_init(&priv->lock);
+	mutex_init(&priv->prpencvf_lock);
 
 	for (i = 0; i < PRPENCVF_NUM_PADS; i++) {
 		priv->pad[i].flags = (i == PRPENCVF_SINK_PAD) ?
@@ -1412,7 +1412,7 @@ static int prp_init(struct imx_ic_priv *ic_priv)
 	ret = media_entity_pads_init(&ic_priv->sd.entity, PRPENCVF_NUM_PADS,
 				     priv->pad);
 	if (ret)
-		mutex_destroy(&priv->lock);
+		mutex_destroy(&priv->prpencvf_lock);
 
 	return ret;
 }
@@ -1421,7 +1421,7 @@ static void prp_remove(struct imx_ic_priv *ic_priv)
 {
 	struct prp_priv *priv = ic_priv->task_priv;
 
-	mutex_destroy(&priv->lock);
+	mutex_destroy(&priv->prpencvf_lock);
 }
 
 struct imx_ic_ops imx_ic_prpencvf_ops = {

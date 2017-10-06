@@ -39,7 +39,7 @@ struct prp_priv {
 	struct media_pad pad[PRP_NUM_PADS];
 
 	/* lock to protect all members below */
-	struct mutex lock;
+	struct mutex prp_lock;
 
 	struct v4l2_subdev *src_sd;
 	struct v4l2_subdev *sink_sd_prpenc;
@@ -102,7 +102,7 @@ static int prp_enum_mbus_code(struct v4l2_subdev *sd,
 	struct v4l2_mbus_framefmt *infmt;
 	int ret = 0;
 
-	mutex_lock(&priv->lock);
+	mutex_lock(&priv->prp_lock);
 
 	switch (code->pad) {
 	case PRP_SINK_PAD:
@@ -122,7 +122,7 @@ static int prp_enum_mbus_code(struct v4l2_subdev *sd,
 		ret = -EINVAL;
 	}
 out:
-	mutex_unlock(&priv->lock);
+	mutex_unlock(&priv->prp_lock);
 	return ret;
 }
 
@@ -137,7 +137,7 @@ static int prp_get_fmt(struct v4l2_subdev *sd,
 	if (sdformat->pad >= PRP_NUM_PADS)
 		return -EINVAL;
 
-	mutex_lock(&priv->lock);
+	mutex_lock(&priv->prp_lock);
 
 	fmt = __prp_get_fmt(priv, cfg, sdformat->pad, sdformat->which);
 	if (!fmt) {
@@ -147,7 +147,7 @@ static int prp_get_fmt(struct v4l2_subdev *sd,
 
 	sdformat->format = *fmt;
 out:
-	mutex_unlock(&priv->lock);
+	mutex_unlock(&priv->prp_lock);
 	return ret;
 }
 
@@ -164,7 +164,7 @@ static int prp_set_fmt(struct v4l2_subdev *sd,
 	if (sdformat->pad >= PRP_NUM_PADS)
 		return -EINVAL;
 
-	mutex_lock(&priv->lock);
+	mutex_lock(&priv->prp_lock);
 
 	if (priv->stream_count > 0) {
 		ret = -EBUSY;
@@ -204,7 +204,7 @@ static int prp_set_fmt(struct v4l2_subdev *sd,
 	fmt = __prp_get_fmt(priv, cfg, sdformat->pad, sdformat->which);
 	*fmt = sdformat->format;
 out:
-	mutex_unlock(&priv->lock);
+	mutex_unlock(&priv->prp_lock);
 	return ret;
 }
 
@@ -223,7 +223,7 @@ static int prp_link_setup(struct media_entity *entity,
 
 	remote_sd = media_entity_to_v4l2_subdev(remote->entity);
 
-	mutex_lock(&priv->lock);
+	mutex_lock(&priv->prp_lock);
 
 	if (local->flags & MEDIA_PAD_FL_SINK) {
 		if (flags & MEDIA_LNK_FL_ENABLED) {
@@ -283,7 +283,7 @@ static int prp_link_setup(struct media_entity *entity,
 	}
 
 out:
-	mutex_unlock(&priv->lock);
+	mutex_unlock(&priv->prp_lock);
 	return ret;
 }
 
@@ -307,7 +307,7 @@ static int prp_link_validate(struct v4l2_subdev *sd,
 	if (IS_ERR(csi))
 		csi = NULL;
 
-	mutex_lock(&priv->lock);
+	mutex_lock(&priv->prp_lock);
 
 	if (priv->src_sd->grp_id & IMX_MEDIA_GRP_ID_IPU_VDIC) {
 		/*
@@ -342,7 +342,7 @@ static int prp_link_validate(struct v4l2_subdev *sd,
 	}
 
 out:
-	mutex_unlock(&priv->lock);
+	mutex_unlock(&priv->prp_lock);
 	return ret;
 }
 
@@ -352,7 +352,7 @@ static int prp_s_stream(struct v4l2_subdev *sd, int enable)
 	struct prp_priv *priv = ic_priv->task_priv;
 	int ret = 0;
 
-	mutex_lock(&priv->lock);
+	mutex_lock(&priv->prp_lock);
 
 	if (!priv->src_sd || (!priv->sink_sd_prpenc && !priv->sink_sd_prpvf)) {
 		ret = -EPIPE;
@@ -390,7 +390,7 @@ update_count:
 	if (priv->stream_count < 0)
 		priv->stream_count = 0;
 out:
-	mutex_unlock(&priv->lock);
+	mutex_unlock(&priv->prp_lock);
 	return ret;
 }
 
@@ -402,9 +402,9 @@ static int prp_g_frame_interval(struct v4l2_subdev *sd,
 	if (fi->pad >= PRP_NUM_PADS)
 		return -EINVAL;
 
-	mutex_lock(&priv->lock);
+	mutex_lock(&priv->prp_lock);
 	fi->interval = priv->frame_interval;
-	mutex_unlock(&priv->lock);
+	mutex_unlock(&priv->prp_lock);
 
 	return 0;
 }
@@ -417,7 +417,7 @@ static int prp_s_frame_interval(struct v4l2_subdev *sd,
 	if (fi->pad >= PRP_NUM_PADS)
 		return -EINVAL;
 
-	mutex_lock(&priv->lock);
+	mutex_lock(&priv->prp_lock);
 
 	/* No limits on valid frame intervals */
 	if (fi->interval.numerator == 0 || fi->interval.denominator == 0)
@@ -425,7 +425,7 @@ static int prp_s_frame_interval(struct v4l2_subdev *sd,
 	else
 		priv->frame_interval = fi->interval;
 
-	mutex_unlock(&priv->lock);
+	mutex_unlock(&priv->prp_lock);
 
 	return 0;
 }
@@ -483,7 +483,7 @@ static int prp_init(struct imx_ic_priv *ic_priv)
 	if (!priv)
 		return -ENOMEM;
 
-	mutex_init(&priv->lock);
+	mutex_init(&priv->prp_lock);
 	ic_priv->task_priv = priv;
 	priv->ic_priv = ic_priv;
 
@@ -499,7 +499,7 @@ static void prp_remove(struct imx_ic_priv *ic_priv)
 {
 	struct prp_priv *priv = ic_priv->task_priv;
 
-	mutex_destroy(&priv->lock);
+	mutex_destroy(&priv->prp_lock);
 }
 
 struct imx_ic_ops imx_ic_prp_ops = {

@@ -65,6 +65,7 @@ struct imx_media_fim {
 	unsigned long     nominal;   /* usec */
 
 	struct completion icap_first_event;
+	bool              icap_busy;
 	bool              stream_on;
 };
 
@@ -423,31 +424,43 @@ int imx_media_fim_set_stream(struct imx_media_fim *fim,
 	unsigned long flags;
 	int ret = 0;
 
-	v4l2_ctrl_lock(fim->ctrl[FIM_CL_ENABLE]);
+	spin_lock_irqsave(&fim->lock, flags);
 
 	if (fim->stream_on == on)
 		goto out;
 
+	if (fim->icap_busy) {
+		ret = -EBUSY;
+		goto out;
+	}
+
 	if (on) {
-		spin_lock_irqsave(&fim->lock, flags);
 		reset_fim(fim, true);
 		update_fim_nominal(fim, fi);
+	}
+
+	if (icap_enabled(fim)) {
+		fim->icap_busy = true;
+
 		spin_unlock_irqrestore(&fim->lock, flags);
 
-		if (icap_enabled(fim)) {
+		if (on) {
 			ret = fim_request_input_capture(fim);
 			if (ret)
-				goto out;
+				return ret;
 			fim_acquire_first_ts(fim);
-		}
-	} else {
-		if (icap_enabled(fim))
+		} else {
 			fim_free_input_capture(fim);
+		}
+
+		spin_lock_irqsave(&fim->lock, flags);
+
+		fim->icap_busy = false;
 	}
 
 	fim->stream_on = on;
 out:
-	v4l2_ctrl_unlock(fim->ctrl[FIM_CL_ENABLE]);
+	spin_unlock_irqrestore(&fim->lock, flags);
 	return ret;
 }
 

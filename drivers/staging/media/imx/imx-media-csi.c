@@ -67,7 +67,7 @@ struct csi_priv {
 	int smfc_id;
 
 	/* lock to protect all members below */
-	struct mutex lock;
+	struct mutex csi_lock;
 
 	int active_output_pad;
 
@@ -909,11 +909,11 @@ static int csi_g_frame_interval(struct v4l2_subdev *sd,
 	if (fi->pad >= CSI_NUM_PADS)
 		return -EINVAL;
 
-	mutex_lock(&priv->lock);
+	mutex_lock(&priv->csi_lock);
 
 	fi->interval = priv->frame_interval[fi->pad];
 
-	mutex_unlock(&priv->lock);
+	mutex_unlock(&priv->csi_lock);
 
 	return 0;
 }
@@ -925,7 +925,7 @@ static int csi_s_frame_interval(struct v4l2_subdev *sd,
 	struct v4l2_fract *input_fi;
 	int ret = 0;
 
-	mutex_lock(&priv->lock);
+	mutex_lock(&priv->csi_lock);
 
 	input_fi = &priv->frame_interval[CSI_SINK_PAD];
 
@@ -961,7 +961,7 @@ static int csi_s_frame_interval(struct v4l2_subdev *sd,
 
 	priv->frame_interval[fi->pad] = fi->interval;
 out:
-	mutex_unlock(&priv->lock);
+	mutex_unlock(&priv->csi_lock);
 	return ret;
 }
 
@@ -970,7 +970,7 @@ static int csi_s_stream(struct v4l2_subdev *sd, int enable)
 	struct csi_priv *priv = v4l2_get_subdevdata(sd);
 	int ret = 0;
 
-	mutex_lock(&priv->lock);
+	mutex_lock(&priv->csi_lock);
 
 	if (!priv->src_sd || !priv->sink) {
 		ret = -EPIPE;
@@ -999,7 +999,7 @@ update_count:
 	if (priv->stream_count < 0)
 		priv->stream_count = 0;
 out:
-	mutex_unlock(&priv->lock);
+	mutex_unlock(&priv->csi_lock);
 	return ret;
 }
 
@@ -1015,7 +1015,7 @@ static int csi_link_setup(struct media_entity *entity,
 	dev_dbg(priv->dev, "link setup %s -> %s\n", remote->entity->name,
 		local->entity->name);
 
-	mutex_lock(&priv->lock);
+	mutex_lock(&priv->csi_lock);
 
 	if (local->flags & MEDIA_PAD_FL_SINK) {
 		if (!is_media_entity_v4l2_subdev(remote->entity)) {
@@ -1093,7 +1093,7 @@ static int csi_link_setup(struct media_entity *entity,
 
 	priv->sink = remote->entity;
 out:
-	mutex_unlock(&priv->lock);
+	mutex_unlock(&priv->csi_lock);
 	return ret;
 }
 
@@ -1118,7 +1118,7 @@ static int csi_link_validate(struct v4l2_subdev *sd,
 		return ret;
 	}
 
-	mutex_lock(&priv->lock);
+	mutex_lock(&priv->csi_lock);
 
 	priv->upstream_ep = upstream_ep;
 	is_csi2 = !is_parallel_bus(&upstream_ep);
@@ -1137,8 +1137,8 @@ static int csi_link_validate(struct v4l2_subdev *sd,
 	/* select either parallel or MIPI-CSI2 as input to CSI */
 	ipu_set_csi_src_mux(priv->ipu, priv->csi_id, is_csi2);
 
-	mutex_unlock(&priv->lock);
-	return ret;
+	mutex_unlock(&priv->csi_lock);
+	return 0;
 }
 
 static struct v4l2_mbus_framefmt *
@@ -1222,7 +1222,7 @@ static int csi_enum_mbus_code(struct v4l2_subdev *sd,
 	struct v4l2_mbus_framefmt *infmt;
 	int ret = 0;
 
-	mutex_lock(&priv->lock);
+	mutex_lock(&priv->csi_lock);
 
 	infmt = __csi_get_fmt(priv, cfg, CSI_SINK_PAD, code->which);
 	incc = imx_media_find_mbus_format(infmt->code, PIXFMT_SEL_ANY);
@@ -1261,7 +1261,7 @@ static int csi_enum_mbus_code(struct v4l2_subdev *sd,
 	}
 
 out:
-	mutex_unlock(&priv->lock);
+	mutex_unlock(&priv->csi_lock);
 	return ret;
 }
 
@@ -1277,7 +1277,7 @@ static int csi_enum_frame_size(struct v4l2_subdev *sd,
 	    fse->index > (fse->pad == CSI_SINK_PAD ? 0 : 3))
 		return -EINVAL;
 
-	mutex_lock(&priv->lock);
+	mutex_lock(&priv->csi_lock);
 
 	if (fse->pad == CSI_SINK_PAD) {
 		fse->min_width = MIN_W;
@@ -1295,7 +1295,7 @@ static int csi_enum_frame_size(struct v4l2_subdev *sd,
 		fse->max_height = fse->min_height;
 	}
 
-	mutex_unlock(&priv->lock);
+	mutex_unlock(&priv->csi_lock);
 	return ret;
 }
 
@@ -1313,7 +1313,7 @@ static int csi_enum_frame_interval(struct v4l2_subdev *sd,
 			   1 : ARRAY_SIZE(csi_skip)))
 		return -EINVAL;
 
-	mutex_lock(&priv->lock);
+	mutex_lock(&priv->csi_lock);
 
 	input_fi = &priv->frame_interval[CSI_SINK_PAD];
 	crop = __csi_get_crop(priv, cfg, fie->which);
@@ -1331,7 +1331,7 @@ static int csi_enum_frame_interval(struct v4l2_subdev *sd,
 					&fie->interval);
 
 out:
-	mutex_unlock(&priv->lock);
+	mutex_unlock(&priv->csi_lock);
 	return ret;
 }
 
@@ -1346,7 +1346,7 @@ static int csi_get_fmt(struct v4l2_subdev *sd,
 	if (sdformat->pad >= CSI_NUM_PADS)
 		return -EINVAL;
 
-	mutex_lock(&priv->lock);
+	mutex_lock(&priv->csi_lock);
 
 	fmt = __csi_get_fmt(priv, cfg, sdformat->pad, sdformat->which);
 	if (!fmt) {
@@ -1356,7 +1356,7 @@ static int csi_get_fmt(struct v4l2_subdev *sd,
 
 	sdformat->format = *fmt;
 out:
-	mutex_unlock(&priv->lock);
+	mutex_unlock(&priv->csi_lock);
 	return ret;
 }
 
@@ -1514,7 +1514,7 @@ static int csi_set_fmt(struct v4l2_subdev *sd,
 		return ret;
 	}
 
-	mutex_lock(&priv->lock);
+	mutex_lock(&priv->csi_lock);
 
 	if (priv->stream_count > 0) {
 		ret = -EBUSY;
@@ -1556,7 +1556,7 @@ static int csi_set_fmt(struct v4l2_subdev *sd,
 		priv->cc[sdformat->pad] = cc;
 
 out:
-	mutex_unlock(&priv->lock);
+	mutex_unlock(&priv->csi_lock);
 	return ret;
 }
 
@@ -1572,7 +1572,7 @@ static int csi_get_selection(struct v4l2_subdev *sd,
 	if (sel->pad != CSI_SINK_PAD)
 		return -EINVAL;
 
-	mutex_lock(&priv->lock);
+	mutex_lock(&priv->csi_lock);
 
 	infmt = __csi_get_fmt(priv, cfg, CSI_SINK_PAD, sel->which);
 	crop = __csi_get_crop(priv, cfg, sel->which);
@@ -1603,7 +1603,7 @@ static int csi_get_selection(struct v4l2_subdev *sd,
 		ret = -EINVAL;
 	}
 
-	mutex_unlock(&priv->lock);
+	mutex_unlock(&priv->csi_lock);
 	return ret;
 }
 
@@ -1643,7 +1643,7 @@ static int csi_set_selection(struct v4l2_subdev *sd,
 		return ret;
 	}
 
-	mutex_lock(&priv->lock);
+	mutex_lock(&priv->csi_lock);
 
 	if (priv->stream_count > 0) {
 		ret = -EBUSY;
@@ -1715,7 +1715,7 @@ static int csi_set_selection(struct v4l2_subdev *sd,
 	}
 
 out:
-	mutex_unlock(&priv->lock);
+	mutex_unlock(&priv->csi_lock);
 	return ret;
 }
 
@@ -2005,7 +2005,7 @@ static int imx_csi_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	mutex_init(&priv->lock);
+	mutex_init(&priv->csi_lock);
 
 	v4l2_ctrl_handler_init(&priv->ctrl_hdlr, 0);
 	priv->sd.ctrl_handler = &priv->ctrl_hdlr;
@@ -2037,7 +2037,7 @@ cleanup:
 	v4l2_async_notifier_cleanup(&priv->notifier);
 free:
 	v4l2_ctrl_handler_free(&priv->ctrl_hdlr);
-	mutex_destroy(&priv->lock);
+	mutex_destroy(&priv->csi_lock);
 	return ret;
 }
 
@@ -2047,7 +2047,7 @@ static int imx_csi_remove(struct platform_device *pdev)
 	struct csi_priv *priv = sd_to_dev(sd);
 
 	v4l2_ctrl_handler_free(&priv->ctrl_hdlr);
-	mutex_destroy(&priv->lock);
+	mutex_destroy(&priv->csi_lock);
 	v4l2_async_notifier_unregister(&priv->notifier);
 	v4l2_async_notifier_cleanup(&priv->notifier);
 	v4l2_async_unregister_subdev(sd);
