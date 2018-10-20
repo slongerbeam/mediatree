@@ -41,7 +41,7 @@ struct vdic_priv;
 
 struct vdic_pipeline_ops {
 	int (*setup)(struct vdic_priv *priv);
-	void (*start)(struct vdic_priv *priv);
+	int (*start)(struct vdic_priv *priv);
 	void (*stop)(struct vdic_priv *priv);
 	void (*disable)(struct vdic_priv *priv);
 };
@@ -83,6 +83,9 @@ struct vdic_priv {
 	struct imx_media_buffer *curr_in_buf;
 	struct imx_media_buffer *prev_in_buf;
 
+	/* protect above input buffers in interrupt_service_routine */
+	spinlock_t irq_lock;
+
 	/*
 	 * translated field type, input line stride, and field size
 	 * for indirect path
@@ -109,7 +112,7 @@ struct vdic_priv {
 	struct v4l2_ctrl_handler ctrl_hdlr;
 	enum ipu_motion_sel motion;
 
-	int stream_count;
+	atomic_t stream_count;
 };
 
 static void vdic_put_ipu_resources(struct vdic_priv *priv)
@@ -180,28 +183,53 @@ out:
 	return ret;
 }
 
-/*
- * This function is currently unused, but will be called when the
- * output/mem2mem device at the IDMAC input pad sends us a new
- * buffer. It kicks off the IDMAC read channels to bring in the
- * buffer fields from memory and begin the conversions.
- */
-static void __maybe_unused prepare_vdi_in_buffers(struct vdic_priv *priv,
-						  struct imx_media_buffer *curr)
+static void unprepare_vdic_in_buffers(struct vdic_priv *priv,
+				      enum vb2_buffer_state return_status)
+{
+	if (priv->prev_in_buf) {
+		imx_media_video_device_buf_done(priv->vdev,
+						priv->prev_in_buf,
+						return_status);
+		priv->prev_in_buf = NULL;
+	}
+
+	if (priv->curr_in_buf) {
+		imx_media_video_device_buf_done(priv->vdev,
+						priv->curr_in_buf,
+						return_status);
+		priv->curr_in_buf = NULL;
+	}
+}
+
+static int prepare_vdic_in_buffers(struct vdic_priv *priv)
 {
 	dma_addr_t prev_phys, curr_phys, next_phys;
-	struct imx_media_buffer *prev;
 	struct vb2_buffer *curr_vb, *prev_vb;
+	struct imx_media_buffer *buf;
 	u32 fs = priv->field_size;
 	u32 is = priv->in_stride;
 
-	/* current input buffer is now previous */
-	priv->prev_in_buf = priv->curr_in_buf;
-	priv->curr_in_buf = curr;
-	prev = priv->prev_in_buf ? priv->prev_in_buf : curr;
+	buf = imx_media_video_device_next_buf(priv->vdev);
+	if (!buf)
+		return -EIO;
 
-	prev_vb = &prev->vbuf.vb2_buf;
-	curr_vb = &curr->vbuf.vb2_buf;
+	if (!priv->curr_in_buf) {
+		priv->prev_in_buf = buf;
+		buf = imx_media_video_device_next_buf(priv->vdev);
+		if (!buf) {
+			unprepare_vdic_in_buffers(priv,
+						  VB2_BUF_STATE_QUEUED);
+			return -EIO;
+		}
+		priv->curr_in_buf = buf;
+	} else {
+		/* current input buffer is now previous */
+		priv->prev_in_buf = priv->curr_in_buf;
+		priv->curr_in_buf = buf;
+	}
+
+	prev_vb = &priv->prev_in_buf->vbuf.vb2_buf;
+	curr_vb = &priv->curr_in_buf->vbuf.vb2_buf;
 
 	switch (priv->fieldtype) {
 	case V4L2_FIELD_SEQ_TB:
@@ -222,7 +250,7 @@ static void __maybe_unused prepare_vdi_in_buffers(struct vdic_priv *priv,
 		 * can't get here, priv->fieldtype can only be one of
 		 * the above. This is to quiet smatch errors.
 		 */
-		return;
+		return -EINVAL;
 	}
 
 	ipu_cpmem_set_buffer(priv->vdi_in_ch_p, 0, prev_phys);
@@ -232,11 +260,12 @@ static void __maybe_unused prepare_vdi_in_buffers(struct vdic_priv *priv,
 	ipu_idmac_select_buffer(priv->vdi_in_ch_p, 0);
 	ipu_idmac_select_buffer(priv->vdi_in_ch, 0);
 	ipu_idmac_select_buffer(priv->vdi_in_ch_n, 0);
+
+	return 0;
 }
 
-static int setup_vdi_channel(struct vdic_priv *priv,
-			     struct ipuv3_channel *channel,
-			     dma_addr_t phys0, dma_addr_t phys1)
+static int setup_vdic_in_channel(struct vdic_priv *priv,
+				 struct ipuv3_channel *channel)
 {
 	struct imx_media_video_dev *vdev = priv->vdev;
 	unsigned int burst_size;
@@ -251,8 +280,6 @@ static int setup_vdi_channel(struct vdic_priv *priv,
 	/* one field to VDIC channels */
 	image.pix.height /= 2;
 	image.rect.height /= 2;
-	image.phys0 = phys0;
-	image.phys1 = phys1;
 
 	ret = ipu_cpmem_set_image(channel, &image);
 	if (ret)
@@ -277,8 +304,9 @@ static int vdic_setup_direct(struct vdic_priv *priv)
 	return 0;
 }
 
-static void vdic_start_direct(struct vdic_priv *priv)
+static int vdic_start_direct(struct vdic_priv *priv)
 {
+	return 0;
 }
 
 static void vdic_stop_direct(struct vdic_priv *priv)
@@ -313,21 +341,13 @@ static int vdic_setup_indirect(struct vdic_priv *priv)
 	priv->fieldtype = infmt->field;
 
 	/* init the vdi-in channels */
-	ret = setup_vdi_channel(priv, priv->vdi_in_ch_p, 0, 0);
+	ret = setup_vdic_in_channel(priv, priv->vdi_in_ch_p);
 	if (ret)
 		return ret;
-	ret = setup_vdi_channel(priv, priv->vdi_in_ch, 0, 0);
+	ret = setup_vdic_in_channel(priv, priv->vdi_in_ch);
 	if (ret)
 		return ret;
-	return setup_vdi_channel(priv, priv->vdi_in_ch_n, 0, 0);
-}
-
-static void vdic_start_indirect(struct vdic_priv *priv)
-{
-	/* enable the channels */
-	ipu_idmac_enable_channel(priv->vdi_in_ch_p);
-	ipu_idmac_enable_channel(priv->vdi_in_ch);
-	ipu_idmac_enable_channel(priv->vdi_in_ch_n);
+	return setup_vdic_in_channel(priv, priv->vdi_in_ch_n);
 }
 
 static void vdic_stop_indirect(struct vdic_priv *priv)
@@ -338,8 +358,25 @@ static void vdic_stop_indirect(struct vdic_priv *priv)
 	ipu_idmac_disable_channel(priv->vdi_in_ch_n);
 }
 
+static int vdic_start_indirect(struct vdic_priv *priv)
+{
+	int ret;
+
+	/* enable the channels */
+	ipu_idmac_enable_channel(priv->vdi_in_ch_p);
+	ipu_idmac_enable_channel(priv->vdi_in_ch);
+	ipu_idmac_enable_channel(priv->vdi_in_ch_n);
+
+	ret = prepare_vdic_in_buffers(priv);
+	if (ret)
+		vdic_stop_indirect(priv);
+
+	return ret;
+}
+
 static void vdic_disable_indirect(struct vdic_priv *priv)
 {
+	unprepare_vdic_in_buffers(priv, VB2_BUF_STATE_ERROR);
 }
 
 static struct vdic_pipeline_ops direct_ops = {
@@ -359,6 +396,7 @@ static struct vdic_pipeline_ops indirect_ops = {
 static int vdic_start(struct vdic_priv *priv)
 {
 	struct v4l2_mbus_framefmt *infmt;
+	unsigned long flags;
 	int ret;
 
 	infmt = &priv->format_mbus[priv->active_input_pad];
@@ -387,10 +425,17 @@ static int vdic_start(struct vdic_priv *priv)
 
 	ipu_vdi_enable(priv->vdi);
 
-	priv->ops->start(priv);
+	spin_lock_irqsave(&priv->irq_lock, flags);
+	ret = priv->ops->start(priv);
+	spin_unlock_irqrestore(&priv->irq_lock, flags);
+	if (ret)
+		goto out_disable;
 
 	return 0;
 
+out_disable:
+	ipu_vdi_disable(priv->vdi);
+	priv->ops->disable(priv);
 out_put_ipu:
 	vdic_put_ipu_resources(priv);
 	return ret;
@@ -398,7 +443,12 @@ out_put_ipu:
 
 static void vdic_stop(struct vdic_priv *priv)
 {
+	unsigned long flags;
+
+	spin_lock_irqsave(&priv->irq_lock, flags);
 	priv->ops->stop(priv);
+	spin_unlock_irqrestore(&priv->irq_lock, flags);
+
 	ipu_vdi_disable(priv->vdi);
 	priv->ops->disable(priv);
 
@@ -423,7 +473,7 @@ static int vdic_s_ctrl(struct v4l2_ctrl *ctrl)
 		motion = ctrl->val;
 		if (motion != priv->motion) {
 			/* can't change motion control mid-streaming */
-			if (priv->stream_count > 0) {
+			if (atomic_read(&priv->stream_count) > 0) {
 				ret = -EBUSY;
 				goto out;
 			}
@@ -478,6 +528,50 @@ out_free:
 	return ret;
 }
 
+static int vdic_interrupt_service_routine(struct v4l2_subdev *sd,
+					  u32 status, bool *handled)
+{
+	struct vdic_priv *priv = v4l2_get_subdevdata(sd);
+	struct imx_media_video_dev *vdev = priv->vdev;
+	enum vb2_buffer_state vb2_status;
+	unsigned long flags;
+	int ret = 0;
+
+	spin_lock_irqsave(&priv->irq_lock, flags);
+
+	if (atomic_read(&priv->stream_count) <= 0)
+		goto out;
+
+	switch (status & IMX_SUBDEV_BUF_STATE_MASK) {
+	case IMX_SUBDEV_BUF_STATE_READY:
+		/* if not busy, start, otherwise ignore */
+		if (!priv->prev_in_buf)
+			priv->ops->start(priv);
+		break;
+	case IMX_SUBDEV_BUF_STATE_DONE:
+		priv->ops->stop(priv);
+		if (priv->prev_in_buf) {
+			vb2_status = status & ~IMX_SUBDEV_BUF_STATE_MASK;
+			imx_media_video_device_buf_done(vdev,
+							priv->prev_in_buf,
+							vb2_status);
+			priv->prev_in_buf = NULL;
+		}
+
+		priv->ops->start(priv);
+		break;
+	default:
+		ret = -EINVAL;
+		break;
+	}
+
+out:
+	spin_unlock_irqrestore(&priv->irq_lock, flags);
+
+	return ret;
+}
+
+
 static int vdic_s_stream(struct v4l2_subdev *sd, int enable)
 {
 	struct vdic_priv *priv = v4l2_get_subdevdata(sd);
@@ -498,7 +592,7 @@ static int vdic_s_stream(struct v4l2_subdev *sd, int enable)
 	 * enable/disable streaming only if stream_count is
 	 * going from 0 to 1 / 1 to 0.
 	 */
-	if (priv->stream_count != !enable)
+	if (atomic_read(&priv->stream_count) != !enable)
 		goto update_count;
 
 	dev_dbg(priv->ipu_dev, "%s: stream %s\n", sd->name,
@@ -523,9 +617,12 @@ static int vdic_s_stream(struct v4l2_subdev *sd, int enable)
 	}
 
 update_count:
-	priv->stream_count += enable ? 1 : -1;
-	if (priv->stream_count < 0)
-		priv->stream_count = 0;
+	if (enable)
+		atomic_inc(&priv->stream_count);
+	else
+		atomic_dec(&priv->stream_count);
+	if (atomic_read(&priv->stream_count) < 0)
+		atomic_set(&priv->stream_count, 0);
 out:
 	mutex_unlock(&priv->lock);
 	return ret;
@@ -631,7 +728,7 @@ static int vdic_set_fmt(struct v4l2_subdev *sd,
 
 	mutex_lock(&priv->lock);
 
-	if (priv->stream_count > 0) {
+	if (atomic_read(&priv->stream_count) > 0) {
 		ret = -EBUSY;
 		goto out;
 	}
@@ -880,8 +977,16 @@ static int vdic_registered(struct v4l2_subdev *sd)
 
 	ret = media_entity_pads_init(&sd->entity, VDIC_NUM_PADS, priv->pad);
 	if (ret)
-		v4l2_ctrl_handler_free(&priv->ctrl_hdlr);
+		goto free_ctrls;
 
+	ret = imx_media_video_device_register(priv->vdev);
+	if (ret)
+		goto free_ctrls;
+
+	return 0;
+
+free_ctrls:
+	v4l2_ctrl_handler_free(&priv->ctrl_hdlr);
 	return ret;
 }
 
@@ -889,8 +994,13 @@ static void vdic_unregistered(struct v4l2_subdev *sd)
 {
 	struct vdic_priv *priv = v4l2_get_subdevdata(sd);
 
+	imx_media_video_device_unregister(priv->vdev);
 	v4l2_ctrl_handler_free(&priv->ctrl_hdlr);
 }
+
+static const struct v4l2_subdev_core_ops vdic_core_ops = {
+	.interrupt_service_routine = vdic_interrupt_service_routine,
+};
 
 static const struct v4l2_subdev_pad_ops vdic_pad_ops = {
 	.init_cfg = imx_media_init_cfg,
@@ -912,6 +1022,7 @@ static const struct media_entity_operations vdic_entity_ops = {
 };
 
 static const struct v4l2_subdev_ops vdic_subdev_ops = {
+	.core = &vdic_core_ops,
 	.video = &vdic_video_ops,
 	.pad = &vdic_pad_ops,
 };
@@ -947,7 +1058,15 @@ struct v4l2_subdev *imx_media_vdic_register(struct v4l2_device *v4l2_dev,
 	imx_media_grp_id_to_sd_name(priv->sd.name, sizeof(priv->sd.name),
 				    priv->sd.grp_id, ipu_get_num(ipu));
 
+	priv->vdev = imx_media_video_device_init(priv->ipu_dev,
+						 &priv->sd,
+						 V4L2_BUF_TYPE_VIDEO_OUTPUT,
+						 VDIC_SINK_PAD_IDMAC);
+	if (IS_ERR(priv->vdev))
+		return ERR_PTR(PTR_ERR(priv->vdev));
+
 	mutex_init(&priv->lock);
+	spin_lock_init(&priv->irq_lock);
 
 	ret = v4l2_device_register_subdev(v4l2_dev, &priv->sd);
 	if (ret)
@@ -956,6 +1075,7 @@ struct v4l2_subdev *imx_media_vdic_register(struct v4l2_device *v4l2_dev,
 	return &priv->sd;
 free:
 	mutex_destroy(&priv->lock);
+	imx_media_video_device_remove(priv->vdev);
 	return ERR_PTR(ret);
 }
 
@@ -967,6 +1087,7 @@ int imx_media_vdic_unregister(struct v4l2_subdev *sd)
 
 	v4l2_device_unregister_subdev(sd);
 	mutex_destroy(&priv->lock);
+	imx_media_video_device_remove(priv->vdev);
 	media_entity_cleanup(&sd->entity);
 
 	return 0;
