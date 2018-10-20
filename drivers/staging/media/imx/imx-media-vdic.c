@@ -105,7 +105,8 @@ struct vdic_priv {
 	struct v4l2_format vdev_src_fmt;
 	struct v4l2_rect vdev_compose;
 
-	bool csi_direct;  /* using direct CSI->VDIC->IC pipeline */
+	/* using direct CSI->VDIC->IC pipeline */
+	bool csi_direct;
 
 	/* motion select control */
 	struct v4l2_ctrl_handler ctrl_hdlr;
@@ -202,28 +203,15 @@ static u32 vdic_get_top_field_position(u32 field)
 	return IPU_VDI_FIELD_CURR; /* assume BTB order to VDIC */
 }
 
-/*
- * This function is currently unused, but will be called when the
- * output/mem2mem device at the IDMAC input pad sends us a new
- * buffer. It kicks off the IDMAC read channels to bring in the
- * buffer fields from memory and begin the conversions.
- */
-static void __maybe_unused prepare_vdi_in_buffers(struct vdic_priv *priv,
-						  struct vb2_v4l2_buffer *curr)
+static void prepare_vdic_in_buffers(struct vdic_priv *priv)
 {
 	dma_addr_t prev_phys, curr_phys, next_phys;
-	struct vb2_v4l2_buffer *prev;
 	struct vb2_buffer *curr_vb, *prev_vb;
 	u32 fs = priv->field_size;
 	u32 is = priv->in_stride;
 
-	/* current input buffer is now previous */
-	priv->prev_in_buf = priv->curr_in_buf;
-	priv->curr_in_buf = curr;
-	prev = priv->prev_in_buf ? priv->prev_in_buf : curr;
-
-	prev_vb = &prev->vb2_buf;
-	curr_vb = &curr->vb2_buf;
+	prev_vb = &priv->prev_in_buf->vb2_buf;
+	curr_vb = &priv->curr_in_buf->vb2_buf;
 
 	switch (priv->fieldtype) {
 	case V4L2_FIELD_SEQ_TB:
@@ -256,9 +244,8 @@ static void __maybe_unused prepare_vdi_in_buffers(struct vdic_priv *priv,
 	ipu_idmac_select_buffer(priv->vdi_in_ch_n, 0);
 }
 
-static int setup_vdi_channel(struct vdic_priv *priv,
-			     struct ipuv3_channel *channel,
-			     dma_addr_t phys0, dma_addr_t phys1)
+static int setup_vdic_in_channel(struct vdic_priv *priv,
+				 struct ipuv3_channel *channel)
 {
 	unsigned int burst_size;
 	struct ipu_image image;
@@ -272,8 +259,6 @@ static int setup_vdi_channel(struct vdic_priv *priv,
 	/* one field to VDIC channels */
 	image.pix.height /= 2;
 	image.rect.height /= 2;
-	image.phys0 = phys0;
-	image.phys1 = phys1;
 
 	ret = ipu_cpmem_set_image(channel, &image);
 	if (ret)
@@ -300,10 +285,12 @@ static int vdic_setup_direct(struct vdic_priv *priv)
 
 static void vdic_start_direct(struct vdic_priv *priv)
 {
+	ipu_vdi_enable(priv->vdi);
 }
 
 static void vdic_stop_direct(struct vdic_priv *priv)
 {
+	ipu_vdi_disable(priv->vdi);
 }
 
 static void vdic_disable_direct(struct vdic_priv *priv)
@@ -339,17 +326,23 @@ static int vdic_setup_indirect(struct vdic_priv *priv)
 	priv->fieldtype = infmt->field;
 
 	/* init the vdi-in channels */
-	ret = setup_vdi_channel(priv, priv->vdi_in_ch_p, 0, 0);
+	ret = setup_vdic_in_channel(priv, priv->vdi_in_ch_p);
 	if (ret)
 		return ret;
-	ret = setup_vdi_channel(priv, priv->vdi_in_ch, 0, 0);
+
+	ret = setup_vdic_in_channel(priv, priv->vdi_in_ch);
 	if (ret)
 		return ret;
-	return setup_vdi_channel(priv, priv->vdi_in_ch_n, 0, 0);
+
+	return setup_vdic_in_channel(priv, priv->vdi_in_ch_n);
 }
 
 static void vdic_start_indirect(struct vdic_priv *priv)
 {
+	ipu_vdi_enable(priv->vdi);
+
+	prepare_vdic_in_buffers(priv);
+
 	/* enable the channels */
 	ipu_idmac_enable_channel(priv->vdi_in_ch_p);
 	ipu_idmac_enable_channel(priv->vdi_in_ch);
@@ -362,10 +355,14 @@ static void vdic_stop_indirect(struct vdic_priv *priv)
 	ipu_idmac_disable_channel(priv->vdi_in_ch_p);
 	ipu_idmac_disable_channel(priv->vdi_in_ch);
 	ipu_idmac_disable_channel(priv->vdi_in_ch_n);
+
+	ipu_vdi_disable(priv->vdi);
 }
 
 static void vdic_disable_indirect(struct vdic_priv *priv)
 {
+	priv->prev_in_buf = NULL;
+	priv->curr_in_buf = NULL;
 }
 
 static struct vdic_pipeline_ops direct_ops = {
@@ -412,9 +409,8 @@ static int vdic_start(struct vdic_priv *priv)
 	if (ret)
 		goto out_put_ipu;
 
-	ipu_vdi_enable(priv->vdi);
-
-	priv->ops->start(priv);
+	if (priv->csi_direct)
+		priv->ops->start(priv);
 
 	return 0;
 
@@ -426,7 +422,6 @@ out_put_ipu:
 static void vdic_stop(struct vdic_priv *priv)
 {
 	priv->ops->stop(priv);
-	ipu_vdi_disable(priv->vdi);
 	priv->ops->disable(priv);
 
 	vdic_put_ipu_resources(priv);
@@ -518,8 +513,14 @@ static int vdic_s_stream(struct v4l2_subdev *sd, int enable)
 		goto out;
 	}
 
-	if (priv->csi_direct)
+	if (priv->csi_direct) {
 		src_sd = media_entity_to_v4l2_subdev(priv->src);
+	} else {
+		if (!priv->vdev_src) {
+			ret = -EPIPE;
+			goto out;
+		}
+	}
 
 	/*
 	 * enable/disable streaming only if stream_count is
@@ -744,13 +745,7 @@ static int vdic_link_setup(struct media_entity *entity,
 	}
 
 	if (local->index == VDIC_SINK_PAD_IDMAC) {
-		struct imx_media_video_dev *vdev = priv->vdev_src;
-
-		if (!is_media_entity_v4l2_video_device(remote->entity)) {
-			ret = -EINVAL;
-			goto out;
-		}
-		if (!vdev) {
+		if (!priv->vdev_src) {
 			ret = -ENODEV;
 			goto out;
 		}
@@ -771,6 +766,7 @@ static int vdic_link_setup(struct media_entity *entity,
 			goto out;
 		}
 
+		priv->vdev_src = NULL;
 		priv->csi_direct = true;
 	}
 
