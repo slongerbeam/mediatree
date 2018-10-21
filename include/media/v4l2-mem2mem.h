@@ -357,6 +357,12 @@ struct v4l2_m2m_dev *v4l2_m2m_init(const struct v4l2_m2m_ops *m2m_ops);
 
 #if defined(CONFIG_MEDIA_CONTROLLER)
 void v4l2_m2m_unregister_media_controller(struct v4l2_m2m_dev *m2m_dev);
+int __v4l2_m2m_register_media_controller(struct v4l2_m2m_dev *m2m_dev,
+					 struct video_device *vdev,
+					 struct media_pad *proc_sink,
+					 struct media_pad *proc_source,
+					 u32 link_flags_proc_sink,
+					 u32 link_flags_proc_source);
 int v4l2_m2m_register_media_controller(struct v4l2_m2m_dev *m2m_dev,
 			struct video_device *vdev, int function);
 #else
@@ -368,6 +374,17 @@ v4l2_m2m_unregister_media_controller(struct v4l2_m2m_dev *m2m_dev)
 static inline int
 v4l2_m2m_register_media_controller(struct v4l2_m2m_dev *m2m_dev,
 		struct video_device *vdev, int function)
+{
+	return 0;
+}
+
+static inline int
+__v4l2_m2m_register_media_controller(struct v4l2_m2m_dev *m2m_dev,
+					 struct video_device *vdev,
+					 struct media_pad *proc_sink,
+					 struct media_pad *proc_source,
+					 u32 link_flags_proc_sink,
+				     u32 link_flags_proc_source)
 {
 	return 0;
 }

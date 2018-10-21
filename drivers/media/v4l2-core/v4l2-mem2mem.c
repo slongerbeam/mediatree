@@ -64,20 +64,20 @@ static const char * const m2m_entity_name[] = {
  * struct v4l2_m2m_dev - per-device context
  * @source:		&struct media_entity pointer with the source entity
  *			Used only when the M2M device is registered via
- *			v4l2_m2m_unregister_media_controller().
+ *			v4l2_m2m_register_media_controller().
  * @source_pad:		&struct media_pad with the source pad.
  *			Used only when the M2M device is registered via
- *			v4l2_m2m_unregister_media_controller().
+ *			v4l2_m2m_register_media_controller().
  * @sink:		&struct media_entity pointer with the sink entity
  *			Used only when the M2M device is registered via
- *			v4l2_m2m_unregister_media_controller().
+ *			v4l2_m2m_register_media_controller().
  * @sink_pad:		&struct media_pad with the sink pad.
  *			Used only when the M2M device is registered via
- *			v4l2_m2m_unregister_media_controller().
+ *			v4l2_m2m_register_media_controller().
  * @proc:		&struct media_entity pointer with the M2M device itself.
  * @proc_pads:		&struct media_pad with the @proc pads.
  *			Used only when the M2M device is registered via
- *			v4l2_m2m_unregister_media_controller().
+ *			v4l2_m2m_register_media_controller().
  * @intf_devnode:	&struct media_intf devnode pointer with the interface
  *			with controls the M2M device.
  * @curr_ctx:		currently running instance
@@ -93,8 +93,10 @@ struct v4l2_m2m_dev {
 	struct media_pad	source_pad;
 	struct media_entity	sink;
 	struct media_pad	sink_pad;
-	struct media_entity	proc;
-	struct media_pad	proc_pads[2];
+	struct media_pad	*proc_sink;
+	struct media_pad	*proc_source;
+	struct media_entity	default_proc;
+	struct media_pad	default_proc_pads[2];
 	struct media_intf_devnode *intf_devnode;
 #endif
 
@@ -781,13 +783,16 @@ void v4l2_m2m_unregister_media_controller(struct v4l2_m2m_dev *m2m_dev)
 
 	media_entity_remove_links(m2m_dev->source);
 	media_entity_remove_links(&m2m_dev->sink);
-	media_entity_remove_links(&m2m_dev->proc);
+	if (m2m_dev->proc_sink->entity == &m2m_dev->default_proc)
+		media_entity_remove_links(&m2m_dev->default_proc);
 	media_device_unregister_entity(m2m_dev->source);
 	media_device_unregister_entity(&m2m_dev->sink);
-	media_device_unregister_entity(&m2m_dev->proc);
+	if (m2m_dev->proc_sink->entity == &m2m_dev->default_proc)
+		media_device_unregister_entity(&m2m_dev->default_proc);
 	kfree(m2m_dev->source->name);
 	kfree(m2m_dev->sink.name);
-	kfree(m2m_dev->proc.name);
+	if (m2m_dev->proc_sink->entity == &m2m_dev->default_proc)
+		kfree(m2m_dev->default_proc.name);
 }
 EXPORT_SYMBOL_GPL(v4l2_m2m_unregister_media_controller);
 
@@ -816,8 +821,8 @@ static int v4l2_m2m_register_entity(struct media_device *mdev,
 		num_pads = 1;
 		break;
 	case MEM2MEM_ENT_TYPE_PROC:
-		entity = &m2m_dev->proc;
-		pads = m2m_dev->proc_pads;
+		entity = &m2m_dev->default_proc;
+		pads = m2m_dev->default_proc_pads;
 		pads[0].flags = MEDIA_PAD_FL_SINK;
 		pads[1].flags = MEDIA_PAD_FL_SOURCE;
 		num_pads = 2;
@@ -849,8 +854,12 @@ static int v4l2_m2m_register_entity(struct media_device *mdev,
 	return 0;
 }
 
-int v4l2_m2m_register_media_controller(struct v4l2_m2m_dev *m2m_dev,
-		struct video_device *vdev, int function)
+int __v4l2_m2m_register_media_controller(struct v4l2_m2m_dev *m2m_dev,
+					 struct video_device *vdev,
+					 struct media_pad *proc_sink,
+					 struct media_pad *proc_source,
+					 u32 link_flags_proc_sink,
+					 u32 link_flags_proc_source)
 {
 	struct media_device *mdev = vdev->v4l2_dev->mdev;
 	struct media_link *link;
@@ -859,34 +868,40 @@ int v4l2_m2m_register_media_controller(struct v4l2_m2m_dev *m2m_dev,
 	if (!mdev)
 		return 0;
 
-	/* A memory-to-memory device consists in two
-	 * DMA engine and one video processing entities.
-	 * The DMA engine entities are linked to a V4L interface
+	/*
+	 * A memory-to-memory device consists of two DMA engines and
+	 * either a single video processing entity or a set of entities
+	 * that carry out video processing. The DMA engine entities are
+	 * linked to a V4L interface.
 	 */
 
-	/* Create the three entities with their pads */
+	if (!m2m_dev->proc_sink)
+		m2m_dev->proc_sink = proc_sink;
+	if (!m2m_dev->proc_source)
+		m2m_dev->proc_source = proc_source;
+
+	/* Create the sink/source entities with their pads */
 	m2m_dev->source = &vdev->entity;
 	ret = v4l2_m2m_register_entity(mdev, m2m_dev,
 			MEM2MEM_ENT_TYPE_SOURCE, vdev, MEDIA_ENT_F_IO_V4L);
 	if (ret)
 		return ret;
-	ret = v4l2_m2m_register_entity(mdev, m2m_dev,
-			MEM2MEM_ENT_TYPE_PROC, vdev, function);
-	if (ret)
-		goto err_rel_entity0;
+
 	ret = v4l2_m2m_register_entity(mdev, m2m_dev,
 			MEM2MEM_ENT_TYPE_SINK, vdev, MEDIA_ENT_F_IO_V4L);
 	if (ret)
-		goto err_rel_entity1;
+		goto err_rel_entity0;
 
 	/* Connect the three entities */
-	ret = media_create_pad_link(m2m_dev->source, 0, &m2m_dev->proc, 1,
-			MEDIA_LNK_FL_IMMUTABLE | MEDIA_LNK_FL_ENABLED);
+	ret = media_create_pad_link(m2m_dev->source, 0,
+				    proc_sink->entity, proc_sink->index,
+				    link_flags_proc_sink);
 	if (ret)
-		goto err_rel_entity2;
+		goto err_rel_entity1;
 
-	ret = media_create_pad_link(&m2m_dev->proc, 0, &m2m_dev->sink, 0,
-			MEDIA_LNK_FL_IMMUTABLE | MEDIA_LNK_FL_ENABLED);
+	ret = media_create_pad_link(proc_source->entity, proc_source->index,
+				    &m2m_dev->sink, 0,
+				    link_flags_proc_source);
 	if (ret)
 		goto err_rm_links0;
 
@@ -924,11 +939,9 @@ err_rm_devnode:
 err_rm_links1:
 	media_entity_remove_links(&m2m_dev->sink);
 err_rm_links0:
-	media_entity_remove_links(&m2m_dev->proc);
+	if (proc_sink->entity == &m2m_dev->default_proc)
+		media_entity_remove_links(&m2m_dev->default_proc);
 	media_entity_remove_links(m2m_dev->source);
-err_rel_entity2:
-	media_device_unregister_entity(&m2m_dev->proc);
-	kfree(m2m_dev->proc.name);
 err_rel_entity1:
 	media_device_unregister_entity(&m2m_dev->sink);
 	kfree(m2m_dev->sink.name);
@@ -936,7 +949,39 @@ err_rel_entity0:
 	media_device_unregister_entity(m2m_dev->source);
 	kfree(m2m_dev->source->name);
 	return ret;
+}
+EXPORT_SYMBOL_GPL(__v4l2_m2m_register_media_controller);
+
+int v4l2_m2m_register_media_controller(struct v4l2_m2m_dev *m2m_dev,
+		struct video_device *vdev, int function)
+{
+	struct media_device *mdev = vdev->v4l2_dev->mdev;
+	int ret;
+
+	if (!mdev)
+		return 0;
+
+	ret = v4l2_m2m_register_entity(mdev, m2m_dev,
+			MEM2MEM_ENT_TYPE_PROC, vdev, function);
+	if (ret)
+		return ret;
+
+	m2m_dev->proc_sink = &m2m_dev->default_proc_pads[0];
+	m2m_dev->proc_source = &m2m_dev->default_proc_pads[1];
+
+	ret = __v4l2_m2m_register_media_controller(m2m_dev, vdev,
+			m2m_dev->proc_sink, m2m_dev->proc_source,
+			MEDIA_LNK_FL_IMMUTABLE | MEDIA_LNK_FL_ENABLED,
+			MEDIA_LNK_FL_IMMUTABLE | MEDIA_LNK_FL_ENABLED);
+	if (ret)
+		goto err_rel_entity;
+
 	return 0;
+
+err_rel_entity:
+	media_device_unregister_entity(&m2m_dev->default_proc);
+	kfree(m2m_dev->default_proc.name);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(v4l2_m2m_register_media_controller);
 #endif
