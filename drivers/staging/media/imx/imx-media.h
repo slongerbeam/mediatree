@@ -276,6 +276,14 @@ imx_media_csc_scaler_device_init(struct imx_media_dev *dev);
 int imx_media_csc_scaler_device_register(struct imx_media_video_dev *vdev);
 void imx_media_csc_scaler_device_unregister(struct imx_media_video_dev *vdev);
 
+/* imx-media-mem2mem-vdic.c */
+struct imx_media_video_dev *
+imx_media_mem2mem_vdic_init(struct device *dev, struct v4l2_subdev *vdic,
+			    int vdic_sink_pad, int vdic_src_pad);
+void imx_media_mem2mem_vdic_remove(struct imx_media_video_dev *vdev);
+int imx_media_mem2mem_vdic_register(struct imx_media_video_dev *vdev);
+void imx_media_mem2mem_vdic_unregister(struct imx_media_video_dev *vdev);
+
 /* subdev group ids */
 #define IMX_MEDIA_GRP_ID_CSI2          BIT(8)
 #define IMX_MEDIA_GRP_ID_CSI           BIT(9)
