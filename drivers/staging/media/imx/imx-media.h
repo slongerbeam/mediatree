@@ -163,6 +163,9 @@ struct imx_media_dev {
 	/* IC scaler/CSC mem2mem video device */
 	struct imx_media_video_dev *m2m_vdev;
 
+	/* VDIC de-interlacer mem2mem video devices */
+	struct imx_media_video_dev *m2m_vdic_vdev[2];
+
 	/* the IPU internal subdev's registered synchronously */
 	struct v4l2_subdev *sync_sd[2][NUM_IPU_SUBDEVS];
 };
@@ -297,6 +300,18 @@ struct imx_media_video_dev *
 imx_media_csc_scaler_device_init(struct imx_media_dev *dev);
 int imx_media_csc_scaler_device_register(struct imx_media_video_dev *vdev);
 void imx_media_csc_scaler_device_unregister(struct imx_media_video_dev *vdev);
+
+/* imx-media-mem2mem-vdic.c */
+struct imx_media_video_dev *
+imx_media_mem2mem_vdic_init(struct imx_media_dev *md,
+			    struct v4l2_subdev *vdic_sink,
+			    u32 vdic_sink_pad,
+			    struct v4l2_subdev *vdic_src,
+			    u32 vdic_src_pad);
+int imx_media_mem2mem_vdic_register(struct imx_media_video_dev *vdev);
+void imx_media_mem2mem_vdic_unregister(struct imx_media_video_dev *vdev);
+struct imx_media_video_dev *
+imx_media_mem2mem_vdic_get(const struct media_pad *pad, int ipu_id);
 
 /* subdev group ids */
 #define IMX_MEDIA_GRP_ID_CSI2          BIT(8)

@@ -41,6 +41,7 @@ static int imx_media_subdev_bound(struct v4l2_async_notifier *notifier,
 static int imx6_media_probe_complete(struct v4l2_async_notifier *notifier)
 {
 	struct imx_media_dev *imxmd = notifier2dev(notifier);
+	int i, j;
 	int ret;
 
 	/* call the imx5/6/7 common probe completion handler */
@@ -57,8 +58,53 @@ static int imx6_media_probe_complete(struct v4l2_async_notifier *notifier)
 	}
 
 	ret = imx_media_csc_scaler_device_register(imxmd->m2m_vdev);
+	if (ret)
+		goto unlock;
+
+	for (i = 0; i < 2; i++) {
+		struct v4l2_subdev *vdic = NULL, *prpvf = NULL;
+
+		for (j = 0; j < NUM_IPU_SUBDEVS; j++) {
+			struct v4l2_subdev *sd = imxmd->sync_sd[i][j];
+
+			if (!sd)
+				continue;
+
+			if (sd->grp_id & IMX_MEDIA_GRP_ID_IPU_VDIC)
+				vdic = sd;
+			else if (sd->grp_id & IMX_MEDIA_GRP_ID_IPU_IC_PRPVF)
+				prpvf = sd;
+		}
+
+		if (!vdic || !prpvf)
+			continue;
+
+		imxmd->m2m_vdic_vdev[i] = imx_media_mem2mem_vdic_init(imxmd,
+					vdic, VDIC_SINK_PAD_IDMAC,
+					prpvf, PRPENCVF_SRC_PAD_MEM2MEM);
+		if (IS_ERR(imxmd->m2m_vdic_vdev[i])) {
+			ret = PTR_ERR(imxmd->m2m_vdic_vdev[i]);
+			imxmd->m2m_vdic_vdev[i] = NULL;
+			goto m2m_remove;
+		}
+
+		ret = imx_media_mem2mem_vdic_register(imxmd->m2m_vdic_vdev[i]);
+		if (ret) {
+			imxmd->m2m_vdic_vdev[i] = NULL;
+			goto m2m_remove;
+		}
+	}
+
+	mutex_unlock(&imxmd->mutex);
+
+	return 0;
+
+m2m_remove:
+	if (i > 0 && imxmd->m2m_vdic_vdev[0])
+		imx_media_mem2mem_vdic_unregister(imxmd->m2m_vdic_vdev[0]);
 unlock:
 	mutex_unlock(&imxmd->mutex);
+
 	return ret;
 }
 
@@ -104,6 +150,7 @@ static int imx_media_remove(struct platform_device *pdev)
 {
 	struct imx_media_dev *imxmd =
 		(struct imx_media_dev *)platform_get_drvdata(pdev);
+	int i;
 
 	v4l2_info(&imxmd->v4l2_dev, "Removing imx-media\n");
 
@@ -111,6 +158,11 @@ static int imx_media_remove(struct platform_device *pdev)
 	imx_media_unregister_ipu_internal_subdevs(imxmd);
 	v4l2_async_notifier_cleanup(&imxmd->notifier);
 	imx_media_csc_scaler_device_unregister(imxmd->m2m_vdev);
+	for (i = 0; i < 2; i++) {
+		if (!imxmd->m2m_vdic_vdev[i])
+			continue;
+		imx_media_mem2mem_vdic_unregister(imxmd->m2m_vdic_vdev[i]);
+	}
 	media_device_unregister(&imxmd->md);
 	v4l2_device_unregister(&imxmd->v4l2_dev);
 	media_device_cleanup(&imxmd->md);
