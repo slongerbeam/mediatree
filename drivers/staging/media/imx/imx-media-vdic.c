@@ -80,8 +80,8 @@ struct vdic_priv {
 	struct vdic_pipeline_ops *ops;
 
 	/* current and previous input buffers indirect path */
-	struct imx_media_buffer *curr_in_buf;
-	struct imx_media_buffer *prev_in_buf;
+	struct vb2_v4l2_buffer *curr_in_buf;
+	struct vb2_v4l2_buffer *prev_in_buf;
 
 	/*
 	 * translated field type, input line stride, and field size
@@ -100,8 +100,10 @@ struct vdic_priv {
 	const struct imx_media_pixfmt *cc[VDIC_NUM_PADS];
 	struct v4l2_fract frame_interval[VDIC_NUM_PADS];
 
-	/* the video device at IDMAC input pad */
-	struct imx_media_video_dev *vdev;
+	/* the video device connected to idmac input pad */
+	struct imx_media_video_dev *vdev_src;
+	struct v4l2_format vdev_src_fmt;
+	struct v4l2_rect vdev_compose;
 
 	bool csi_direct;  /* using direct CSI->VDIC->IC pipeline */
 
@@ -207,10 +209,10 @@ static u32 vdic_get_top_field_position(u32 field)
  * buffer fields from memory and begin the conversions.
  */
 static void __maybe_unused prepare_vdi_in_buffers(struct vdic_priv *priv,
-						  struct imx_media_buffer *curr)
+						  struct vb2_v4l2_buffer *curr)
 {
 	dma_addr_t prev_phys, curr_phys, next_phys;
-	struct imx_media_buffer *prev;
+	struct vb2_v4l2_buffer *prev;
 	struct vb2_buffer *curr_vb, *prev_vb;
 	u32 fs = priv->field_size;
 	u32 is = priv->in_stride;
@@ -220,8 +222,8 @@ static void __maybe_unused prepare_vdi_in_buffers(struct vdic_priv *priv,
 	priv->curr_in_buf = curr;
 	prev = priv->prev_in_buf ? priv->prev_in_buf : curr;
 
-	prev_vb = &prev->vbuf.vb2_buf;
-	curr_vb = &curr->vbuf.vb2_buf;
+	prev_vb = &prev->vb2_buf;
+	curr_vb = &curr->vb2_buf;
 
 	switch (priv->fieldtype) {
 	case V4L2_FIELD_SEQ_TB:
@@ -258,7 +260,6 @@ static int setup_vdi_channel(struct vdic_priv *priv,
 			     struct ipuv3_channel *channel,
 			     dma_addr_t phys0, dma_addr_t phys1)
 {
-	struct imx_media_video_dev *vdev = priv->vdev;
 	unsigned int burst_size;
 	struct ipu_image image;
 	int ret;
@@ -266,8 +267,8 @@ static int setup_vdi_channel(struct vdic_priv *priv,
 	ipu_cpmem_zero(channel);
 
 	memset(&image, 0, sizeof(image));
-	image.pix = vdev->fmt.fmt.pix;
-	image.rect = vdev->compose;
+	image.pix = priv->vdev_src_fmt.fmt.pix;
+	image.rect = priv->vdev_compose;
 	/* one field to VDIC channels */
 	image.pix.height /= 2;
 	image.rect.height /= 2;
@@ -313,12 +314,17 @@ static void vdic_disable_direct(struct vdic_priv *priv)
 
 static int vdic_setup_indirect(struct vdic_priv *priv)
 {
+	struct imx_media_video_dev *vdev_src = priv->vdev_src;
 	struct v4l2_mbus_framefmt *infmt;
 	const struct imx_media_pixfmt *incc;
 	int in_size, ret;
 
 	infmt = &priv->format_mbus[VDIC_SINK_PAD_IDMAC];
 	incc = priv->cc[VDIC_SINK_PAD_IDMAC];
+
+	priv->vdev_src_fmt.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+	vdev_src->ops->get_fmt(vdev_src, &priv->vdev_src_fmt,
+			       &priv->vdev_compose, NULL);
 
 	in_size = (infmt->width * incc->bpp * infmt->height) >> 3;
 
@@ -738,7 +744,7 @@ static int vdic_link_setup(struct media_entity *entity,
 	}
 
 	if (local->index == VDIC_SINK_PAD_IDMAC) {
-		struct imx_media_video_dev *vdev = priv->vdev;
+		struct imx_media_video_dev *vdev = priv->vdev_src;
 
 		if (!is_media_entity_v4l2_video_device(remote->entity)) {
 			ret = -EINVAL;
