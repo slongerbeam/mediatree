@@ -60,6 +60,10 @@ struct csi_priv {
 	struct media_pad pad[CSI_NUM_PADS];
 	/* the video device at IDMAC output pad */
 	struct imx_media_video_dev *vdev;
+	struct v4l2_format vdev_fmt;
+	struct v4l2_rect vdev_compose;
+	const struct imx_media_pixfmt *vdev_cc;
+
 	struct imx_media_fim *fim;
 	int csi_id;
 	int smfc_id;
@@ -81,7 +85,7 @@ struct csi_priv {
 	const struct csi_skip_desc *skip;
 
 	/* active vb2 buffers to send to video dev sink */
-	struct imx_media_buffer *active_vb2_buf[2];
+	struct vb2_v4l2_buffer *active_vb2_buf[2];
 	struct imx_media_dma_buf underrun_buf;
 
 	int ipu_buf_num;  /* ipu double buffer index: 0-1 */
@@ -262,27 +266,25 @@ out:
 static void csi_vb2_buf_done(struct csi_priv *priv)
 {
 	struct imx_media_video_dev *vdev = priv->vdev;
-	struct imx_media_buffer *done, *next;
-	struct vb2_buffer *vb;
+	struct vb2_v4l2_buffer *done, *next;
 	dma_addr_t phys;
 
 	done = priv->active_vb2_buf[priv->ipu_buf_num];
 	if (done) {
-		done->vbuf.field = vdev->fmt.fmt.pix.field;
-		done->vbuf.sequence = priv->frame_sequence;
-		vb = &done->vbuf.vb2_buf;
-		vb->timestamp = ktime_get_ns();
-		vb2_buffer_done(vb, priv->nfb4eof ?
-				VB2_BUF_STATE_ERROR : VB2_BUF_STATE_DONE);
+		done->sequence = priv->frame_sequence;
+		vdev->ops->buf_done(vdev, NULL, done,
+				    priv->nfb4eof ?
+				    VB2_BUF_STATE_ERROR :
+				    VB2_BUF_STATE_DONE);
 	}
 
 	priv->frame_sequence++;
 	priv->nfb4eof = false;
 
 	/* get next queued buffer */
-	next = imx_media_capture_device_next_buf(vdev);
+	next = vdev->ops->get_next_buf(vdev, NULL, V4L2_BUF_TYPE_VIDEO_CAPTURE);
 	if (next) {
-		phys = vb2_dma_contig_plane_dma_addr(&next->vbuf.vb2_buf, 0);
+		phys = vb2_dma_contig_plane_dma_addr(&next->vb2_buf, 0);
 		priv->active_vb2_buf[priv->ipu_buf_num] = next;
 	} else {
 		phys = priv->underrun_buf.phys;
@@ -293,7 +295,7 @@ static void csi_vb2_buf_done(struct csi_priv *priv)
 		ipu_idmac_clear_buffer(priv->idmac_ch, priv->ipu_buf_num);
 
 	if (priv->interweave_swap)
-		phys += vdev->fmt.fmt.pix.bytesperline;
+		phys += priv->vdev_fmt.fmt.pix.bytesperline;
 
 	ipu_cpmem_set_buffer(priv->idmac_ch, priv->ipu_buf_num, phys);
 }
@@ -361,21 +363,22 @@ static void csi_idmac_eof_timeout(struct timer_list *t)
 	v4l2_err(&priv->sd, "EOF timeout\n");
 
 	/* signal a fatal error to capture device */
-	imx_media_capture_device_error(vdev);
+	vdev->ops->device_error(vdev, NULL);
 }
 
 static void csi_idmac_setup_vb2_buf(struct csi_priv *priv, dma_addr_t *phys)
 {
 	struct imx_media_video_dev *vdev = priv->vdev;
-	struct imx_media_buffer *buf;
+	struct vb2_v4l2_buffer *buf;
 	int i;
 
 	for (i = 0; i < 2; i++) {
-		buf = imx_media_capture_device_next_buf(vdev);
+		buf = vdev->ops->get_next_buf(vdev, NULL,
+					      V4L2_BUF_TYPE_VIDEO_CAPTURE);
 		if (buf) {
 			priv->active_vb2_buf[i] = buf;
 			phys[i] = vb2_dma_contig_plane_dma_addr(
-				&buf->vbuf.vb2_buf, 0);
+				&buf->vb2_buf, 0);
 		} else {
 			priv->active_vb2_buf[i] = NULL;
 			phys[i] = priv->underrun_buf.phys;
@@ -386,25 +389,21 @@ static void csi_idmac_setup_vb2_buf(struct csi_priv *priv, dma_addr_t *phys)
 static void csi_idmac_unsetup_vb2_buf(struct csi_priv *priv,
 				      enum vb2_buffer_state return_status)
 {
-	struct imx_media_buffer *buf;
+	struct imx_media_video_dev *vdev = priv->vdev;
+	struct vb2_v4l2_buffer *buf;
 	int i;
 
 	/* return any remaining active frames with return_status */
 	for (i = 0; i < 2; i++) {
 		buf = priv->active_vb2_buf[i];
-		if (buf) {
-			struct vb2_buffer *vb = &buf->vbuf.vb2_buf;
-
-			vb->timestamp = ktime_get_ns();
-			vb2_buffer_done(vb, return_status);
-		}
+		if (buf)
+			vdev->ops->buf_done(vdev, NULL, buf, return_status);
 	}
 }
 
 /* init the SMFC IDMAC channel */
 static int csi_idmac_setup_channel(struct csi_priv *priv)
 {
-	struct imx_media_video_dev *vdev = priv->vdev;
 	const struct imx_media_pixfmt *incc;
 	struct v4l2_mbus_framefmt *infmt;
 	struct v4l2_mbus_framefmt *outfmt;
@@ -423,8 +422,8 @@ static int csi_idmac_setup_channel(struct csi_priv *priv)
 	ipu_cpmem_zero(priv->idmac_ch);
 
 	memset(&image, 0, sizeof(image));
-	image.pix = vdev->fmt.fmt.pix;
-	image.rect = vdev->compose;
+	image.pix = priv->vdev_fmt.fmt.pix;
+	image.rect = priv->vdev_compose;
 
 	csi_idmac_setup_vb2_buf(priv, phys);
 
@@ -596,7 +595,6 @@ static int csi_idmac_setup(struct csi_priv *priv)
 static int csi_idmac_start(struct csi_priv *priv)
 {
 	struct imx_media_video_dev *vdev = priv->vdev;
-	struct v4l2_pix_format *outfmt;
 	int ret;
 
 	ret = csi_idmac_get_ipu_resources(priv);
@@ -605,10 +603,12 @@ static int csi_idmac_start(struct csi_priv *priv)
 
 	ipu_smfc_map_channel(priv->smfc, priv->csi_id, priv->vc_num);
 
-	outfmt = &vdev->fmt.fmt.pix;
+	priv->vdev_fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	vdev->ops->get_fmt(vdev, &priv->vdev_fmt, &priv->vdev_compose,
+			   &priv->vdev_cc);
 
 	ret = imx_media_alloc_dma_buf(priv->dev, &priv->underrun_buf,
-				      outfmt->sizeimage);
+				      priv->vdev_fmt.fmt.pix.sizeimage);
 	if (ret)
 		goto out_put_ipu;
 

@@ -48,6 +48,12 @@ struct capture_priv {
 	/* protect ready_q */
 	spinlock_t             q_lock;
 
+	/* the user format */
+	struct v4l2_format fmt;
+	/* the compose rectangle */
+	struct v4l2_rect compose;
+	const struct imx_media_pixfmt *cc;
+
 	/* controls inherited from subdevs */
 	struct v4l2_ctrl_handler ctrl_hdlr;
 
@@ -57,10 +63,100 @@ struct capture_priv {
 
 #define to_capture_priv(v) container_of(v, struct capture_priv, vdev)
 
+struct imx_media_buffer {
+	struct vb2_v4l2_buffer vbuf; /* v4l buffer must be first */
+	struct list_head  list;
+};
+
+#define to_imx_media_buffer(vb) \
+	container_of(to_vb2_v4l2_buffer(vb), struct imx_media_buffer, vbuf)
+
 /* In bytes, per queue */
 #define VID_MEM_LIMIT	SZ_64M
 
 static const struct vb2_ops capture_qops;
+
+/*
+ * imx-media video device ops follow
+ */
+
+static int capture_get_fmt(struct imx_media_video_dev *vdev,
+			   struct v4l2_format *f,
+			   struct v4l2_rect *compose,
+			   const struct imx_media_pixfmt **cc)
+{
+	struct capture_priv *priv = to_capture_priv(vdev);
+
+	*f = priv->fmt;
+	if (compose)
+		*compose = priv->compose;
+	if (cc)
+		*cc = priv->cc;
+	return 0;
+}
+
+static struct vb2_v4l2_buffer *
+capture_get_next_buf(struct imx_media_video_dev *vdev, void *run_ctx,
+		     enum v4l2_buf_type type)
+{
+	struct capture_priv *priv = to_capture_priv(vdev);
+	struct imx_media_buffer *buf = NULL;
+	unsigned long flags;
+
+	if (type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
+		return ERR_PTR(-EINVAL);
+
+	spin_lock_irqsave(&priv->q_lock, flags);
+
+	/* get next queued buffer */
+	if (!list_empty(&priv->ready_q)) {
+		buf = list_entry(priv->ready_q.next, struct imx_media_buffer,
+				 list);
+		list_del(&buf->list);
+	}
+
+	spin_unlock_irqrestore(&priv->q_lock, flags);
+
+	return &buf->vbuf;
+}
+
+static void capture_buf_done(struct imx_media_video_dev *vdev, void *run_ctx,
+			     struct vb2_v4l2_buffer *done,
+			     enum vb2_buffer_state status)
+{
+	struct capture_priv *priv = to_capture_priv(vdev);
+	struct vb2_buffer *vb;
+	unsigned long flags;
+
+	spin_lock_irqsave(&priv->q_lock, flags);
+	done->field = priv->fmt.fmt.pix.field;
+	vb = &done->vb2_buf;
+	vb->timestamp = ktime_get_ns();
+	vb2_buffer_done(vb, status);
+	spin_unlock_irqrestore(&priv->q_lock, flags);
+}
+
+static void capture_device_error(struct imx_media_video_dev *vdev,
+				 void *run_ctx)
+{
+	struct capture_priv *priv = to_capture_priv(vdev);
+	struct vb2_queue *vq = &priv->q;
+	unsigned long flags;
+
+	if (!vb2_is_streaming(vq))
+		return;
+
+	spin_lock_irqsave(&priv->q_lock, flags);
+	vb2_queue_error(vq);
+	spin_unlock_irqrestore(&priv->q_lock, flags);
+}
+
+static const struct imx_media_video_dev_ops capture_ops = {
+	.get_fmt = capture_get_fmt,
+	.get_next_buf = capture_get_next_buf,
+	.buf_done = capture_buf_done,
+	.device_error = capture_device_error,
+};
 
 /*
  * Video ioctls follow
@@ -196,9 +292,7 @@ static int capture_g_fmt_vid_cap(struct file *file, void *fh,
 {
 	struct capture_priv *priv = video_drvdata(file);
 
-	*f = priv->vdev.fmt;
-
-	return 0;
+	return capture_get_fmt(&priv->vdev, f, NULL, NULL);
 }
 
 static int __capture_try_fmt_vid_cap(struct capture_priv *priv,
@@ -294,12 +388,12 @@ static int capture_s_fmt_vid_cap(struct file *file, void *fh,
 	if (ret)
 		return ret;
 
-	ret = __capture_try_fmt_vid_cap(priv, &fmt_src, f, &priv->vdev.cc,
-					&priv->vdev.compose);
+	ret = __capture_try_fmt_vid_cap(priv, &fmt_src, f, &priv->cc,
+					&priv->compose);
 	if (ret)
 		return ret;
 
-	priv->vdev.fmt.fmt.pix = f->fmt.pix;
+	priv->fmt.fmt.pix = f->fmt.pix;
 
 	return 0;
 }
@@ -338,7 +432,7 @@ static int capture_g_selection(struct file *file, void *fh,
 	case V4L2_SEL_TGT_COMPOSE_DEFAULT:
 	case V4L2_SEL_TGT_COMPOSE_BOUNDS:
 		/* The compose rectangle is fixed to the source format. */
-		s->r = priv->vdev.compose;
+		s->r = priv->compose;
 		break;
 	case V4L2_SEL_TGT_COMPOSE_PADDED:
 		/*
@@ -348,8 +442,8 @@ static int capture_g_selection(struct file *file, void *fh,
 		 */
 		s->r.left = 0;
 		s->r.top = 0;
-		s->r.width = priv->vdev.fmt.fmt.pix.width;
-		s->r.height = priv->vdev.fmt.fmt.pix.height;
+		s->r.width = priv->fmt.fmt.pix.width;
+		s->r.height = priv->fmt.fmt.pix.height;
 		break;
 	default:
 		return -EINVAL;
@@ -463,7 +557,7 @@ static int capture_queue_setup(struct vb2_queue *vq,
 			       struct device *alloc_devs[])
 {
 	struct capture_priv *priv = vb2_get_drv_priv(vq);
-	struct v4l2_pix_format *pix = &priv->vdev.fmt.fmt.pix;
+	struct v4l2_pix_format *pix = &priv->fmt.fmt.pix;
 	unsigned int count = *nbuffers;
 
 	if (vq->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
@@ -491,7 +585,7 @@ static int capture_queue_setup(struct vb2_queue *vq,
 
 static int capture_buf_init(struct vb2_buffer *vb)
 {
-	struct imx_media_buffer *buf = to_imx_media_vb(vb);
+	struct imx_media_buffer *buf = to_imx_media_buffer(vb);
 
 	INIT_LIST_HEAD(&buf->list);
 
@@ -502,7 +596,7 @@ static int capture_buf_prepare(struct vb2_buffer *vb)
 {
 	struct vb2_queue *vq = vb->vb2_queue;
 	struct capture_priv *priv = vb2_get_drv_priv(vq);
-	struct v4l2_pix_format *pix = &priv->vdev.fmt.fmt.pix;
+	struct v4l2_pix_format *pix = &priv->fmt.fmt.pix;
 
 	if (vb2_plane_size(vb, 0) < pix->sizeimage) {
 		v4l2_err(priv->src_sd,
@@ -519,7 +613,7 @@ static int capture_buf_prepare(struct vb2_buffer *vb)
 static void capture_buf_queue(struct vb2_buffer *vb)
 {
 	struct capture_priv *priv = vb2_get_drv_priv(vb->vb2_queue);
-	struct imx_media_buffer *buf = to_imx_media_vb(vb);
+	struct imx_media_buffer *buf = to_imx_media_buffer(vb);
 	unsigned long flags;
 
 	spin_lock_irqsave(&priv->q_lock, flags);
@@ -549,11 +643,11 @@ static int capture_validate_fmt(struct capture_priv *priv)
 	if (ret)
 		return ret;
 
-	return (priv->vdev.fmt.fmt.pix.width != f.fmt.pix.width ||
-		priv->vdev.fmt.fmt.pix.height != f.fmt.pix.height ||
-		priv->vdev.cc->cs != cc->cs ||
-		priv->vdev.compose.width != compose.width ||
-		priv->vdev.compose.height != compose.height) ? -EINVAL : 0;
+	return (priv->fmt.fmt.pix.width != f.fmt.pix.width ||
+		priv->fmt.fmt.pix.height != f.fmt.pix.height ||
+		priv->cc->cs != cc->cs ||
+		priv->compose.width != compose.width ||
+		priv->compose.height != compose.height) ? -EINVAL : 0;
 }
 
 static int capture_start_streaming(struct vb2_queue *vq, unsigned int count)
@@ -690,43 +784,6 @@ static struct video_device capture_videodev = {
 	.device_caps	= V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_STREAMING,
 };
 
-struct imx_media_buffer *
-imx_media_capture_device_next_buf(struct imx_media_video_dev *vdev)
-{
-	struct capture_priv *priv = to_capture_priv(vdev);
-	struct imx_media_buffer *buf = NULL;
-	unsigned long flags;
-
-	spin_lock_irqsave(&priv->q_lock, flags);
-
-	/* get next queued buffer */
-	if (!list_empty(&priv->ready_q)) {
-		buf = list_entry(priv->ready_q.next, struct imx_media_buffer,
-				 list);
-		list_del(&buf->list);
-	}
-
-	spin_unlock_irqrestore(&priv->q_lock, flags);
-
-	return buf;
-}
-EXPORT_SYMBOL_GPL(imx_media_capture_device_next_buf);
-
-void imx_media_capture_device_error(struct imx_media_video_dev *vdev)
-{
-	struct capture_priv *priv = to_capture_priv(vdev);
-	struct vb2_queue *vq = &priv->q;
-	unsigned long flags;
-
-	if (!vb2_is_streaming(vq))
-		return;
-
-	spin_lock_irqsave(&priv->q_lock, flags);
-	vb2_queue_error(vq);
-	spin_unlock_irqrestore(&priv->q_lock, flags);
-}
-EXPORT_SYMBOL_GPL(imx_media_capture_device_error);
-
 int imx_media_capture_device_register(struct imx_media_video_dev *vdev)
 {
 	struct capture_priv *priv = to_capture_priv(vdev);
@@ -784,12 +841,12 @@ int imx_media_capture_device_register(struct imx_media_video_dev *vdev)
 		goto unreg;
 	}
 
-	vdev->fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-	imx_media_mbus_fmt_to_pix_fmt(&vdev->fmt.fmt.pix,
+	priv->fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	imx_media_mbus_fmt_to_pix_fmt(&priv->fmt.fmt.pix,
 				      &fmt_src.format, NULL);
-	vdev->compose.width = fmt_src.format.width;
-	vdev->compose.height = fmt_src.format.height;
-	vdev->cc = imx_media_find_format(vdev->fmt.fmt.pix.pixelformat,
+	priv->compose.width = fmt_src.format.width;
+	priv->compose.height = fmt_src.format.height;
+	priv->cc = imx_media_find_format(priv->fmt.fmt.pix.pixelformat,
 					 CS_SEL_ANY, false);
 
 	v4l2_info(sd, "Registered %s as /dev/%s\n", vfd->name,
@@ -853,6 +910,7 @@ imx_media_capture_device_init(struct device *dev, struct v4l2_subdev *src_sd,
 	vfd->lock = &priv->mutex;
 	vfd->queue = &priv->q;
 	priv->vdev.vfd = vfd;
+	priv->vdev.ops = &capture_ops;
 
 	priv->vdev_pad.flags = MEDIA_PAD_FL_SINK;
 	ret = media_entity_pads_init(&vfd->entity, 1, &priv->vdev_pad);

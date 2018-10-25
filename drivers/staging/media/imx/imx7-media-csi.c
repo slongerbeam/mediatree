@@ -170,6 +170,8 @@ struct imx7_csi {
 
 	struct v4l2_fwnode_endpoint upstream_ep;
 
+	struct v4l2_format vdev_fmt;
+
 	struct v4l2_mbus_framefmt format_mbus[IMX7_CSI_PADS_NUM];
 	const struct imx_media_pixfmt *cc[IMX7_CSI_PADS_NUM];
 	struct v4l2_fract frame_interval[IMX7_CSI_PADS_NUM];
@@ -181,7 +183,7 @@ struct imx7_csi {
 	struct clk *mclk;
 
 	/* active vb2 buffers to send to video dev sink */
-	struct imx_media_buffer *active_vb2_buf[2];
+	struct vb2_v4l2_buffer *active_vb2_buf[2];
 	struct imx_media_dma_buf underrun_buf;
 
 	int buf_num;
@@ -584,17 +586,17 @@ static void imx7_csi_update_buf(struct imx7_csi *csi, dma_addr_t phys,
 static void imx7_csi_setup_vb2_buf(struct imx7_csi *csi)
 {
 	struct imx_media_video_dev *vdev = csi->vdev;
-	struct imx_media_buffer *buf;
-	struct vb2_buffer *vb2_buf;
+	struct vb2_v4l2_buffer *buf;
 	dma_addr_t phys[2];
 	int i;
 
 	for (i = 0; i < 2; i++) {
-		buf = imx_media_capture_device_next_buf(vdev);
+		buf = vdev->ops->get_next_buf(vdev, NULL,
+					      V4L2_BUF_TYPE_VIDEO_CAPTURE);
 		if (buf) {
 			csi->active_vb2_buf[i] = buf;
-			vb2_buf = &buf->vbuf.vb2_buf;
-			phys[i] = vb2_dma_contig_plane_dma_addr(vb2_buf, 0);
+			phys[i] = vb2_dma_contig_plane_dma_addr(&buf->vb2_buf,
+								0);
 		} else {
 			csi->active_vb2_buf[i] = NULL;
 			phys[i] = csi->underrun_buf.phys;
@@ -607,42 +609,35 @@ static void imx7_csi_setup_vb2_buf(struct imx7_csi *csi)
 static void imx7_csi_dma_unsetup_vb2_buf(struct imx7_csi *csi,
 					 enum vb2_buffer_state return_status)
 {
-	struct imx_media_buffer *buf;
+	struct imx_media_video_dev *vdev = csi->vdev;
+	struct vb2_v4l2_buffer *buf;
 	int i;
 
 	/* return any remaining active frames with return_status */
 	for (i = 0; i < 2; i++) {
 		buf = csi->active_vb2_buf[i];
-		if (buf) {
-			struct vb2_buffer *vb = &buf->vbuf.vb2_buf;
-
-			vb->timestamp = ktime_get_ns();
-			vb2_buffer_done(vb, return_status);
-		}
+		if (buf)
+			vdev->ops->buf_done(vdev, NULL, buf, return_status);
 	}
 }
 
 static void imx7_csi_vb2_buf_done(struct imx7_csi *csi)
 {
 	struct imx_media_video_dev *vdev = csi->vdev;
-	struct imx_media_buffer *done, *next;
-	struct vb2_buffer *vb;
+	struct vb2_v4l2_buffer *done, *next;
 	dma_addr_t phys;
 
 	done = csi->active_vb2_buf[csi->buf_num];
 	if (done) {
-		done->vbuf.field = vdev->fmt.fmt.pix.field;
-		done->vbuf.sequence = csi->frame_sequence;
-		vb = &done->vbuf.vb2_buf;
-		vb->timestamp = ktime_get_ns();
-		vb2_buffer_done(vb, VB2_BUF_STATE_DONE);
+		done->sequence = csi->frame_sequence;
+		vdev->ops->buf_done(vdev, NULL, done, VB2_BUF_STATE_DONE);
 	}
 	csi->frame_sequence++;
 
 	/* get next queued buffer */
-	next = imx_media_capture_device_next_buf(vdev);
+	next = vdev->ops->get_next_buf(vdev, NULL, V4L2_BUF_TYPE_VIDEO_CAPTURE);
 	if (next) {
-		phys = vb2_dma_contig_plane_dma_addr(&next->vbuf.vb2_buf, 0);
+		phys = vb2_dma_contig_plane_dma_addr(&next->vb2_buf, 0);
 		csi->active_vb2_buf[csi->buf_num] = next;
 	} else {
 		phys = csi->underrun_buf.phys;
@@ -712,12 +707,10 @@ static irqreturn_t imx7_csi_irq_handler(int irq, void *data)
 
 static int imx7_csi_dma_start(struct imx7_csi *csi)
 {
-	struct imx_media_video_dev *vdev = csi->vdev;
-	struct v4l2_pix_format *out_pix = &vdev->fmt.fmt.pix;
 	int ret;
 
 	ret = imx_media_alloc_dma_buf(csi->dev, &csi->underrun_buf,
-				      out_pix->sizeimage);
+				      csi->vdev_fmt.fmt.pix.sizeimage);
 	if (ret < 0) {
 		v4l2_warn(&csi->sd, "consider increasing the CMA area\n");
 		return ret;
@@ -761,8 +754,7 @@ static void imx7_csi_dma_stop(struct imx7_csi *csi)
 
 static int imx7_csi_configure(struct imx7_csi *csi)
 {
-	struct imx_media_video_dev *vdev = csi->vdev;
-	struct v4l2_pix_format *out_pix = &vdev->fmt.fmt.pix;
+	struct v4l2_pix_format *out_pix = &csi->vdev_fmt.fmt.pix;
 	__u32 in_code = csi->format_mbus[IMX7_CSI_PAD_SINK].code;
 	u32 cr1, cr18;
 	int width = out_pix->width;
@@ -848,7 +840,11 @@ static void imx7_csi_disable(struct imx7_csi *csi)
 
 static int imx7_csi_streaming_start(struct imx7_csi *csi)
 {
+	struct imx_media_video_dev *vdev = csi->vdev;
 	int ret;
+
+	csi->vdev_fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	vdev->ops->get_fmt(vdev, &csi->vdev_fmt, NULL, NULL);
 
 	ret = imx7_csi_dma_start(csi);
 	if (ret < 0)

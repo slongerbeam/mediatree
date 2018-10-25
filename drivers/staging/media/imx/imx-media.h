@@ -79,30 +79,28 @@ struct imx_media_pixfmt {
 	bool    ipufmt;  /* is one of the IPU internal formats */
 };
 
-struct imx_media_buffer {
-	struct vb2_v4l2_buffer vbuf; /* v4l buffer must be first */
-	struct list_head  list;
+struct imx_media_video_dev;
+
+struct imx_media_video_dev_ops {
+	int (*get_fmt)(struct imx_media_video_dev *vdev,
+		       struct v4l2_format *fmt,
+		       struct v4l2_rect *compose,
+		       const struct imx_media_pixfmt **cc);
+	struct vb2_v4l2_buffer *
+	(*get_next_buf)(struct imx_media_video_dev *vdev, void *run_ctx,
+			enum v4l2_buf_type type);
+	void (*buf_done)(struct imx_media_video_dev *vdev, void *run_ctx,
+			 struct vb2_v4l2_buffer *done,
+			 enum vb2_buffer_state status);
+	void (*device_error)(struct imx_media_video_dev *vdev, void *run_ctx);
 };
 
 struct imx_media_video_dev {
 	struct video_device *vfd;
-
-	/* the user format */
-	struct v4l2_format fmt;
-	/* the compose rectangle */
-	struct v4l2_rect compose;
-	const struct imx_media_pixfmt *cc;
-
+	const struct imx_media_video_dev_ops *ops;
 	/* links this vdev to master list */
 	struct list_head list;
 };
-
-static inline struct imx_media_buffer *to_imx_media_vb(struct vb2_buffer *vb)
-{
-	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
-
-	return container_of(vbuf, struct imx_media_buffer, vbuf);
-}
 
 /*
  * to support control inheritance to video devices, this
@@ -271,9 +269,6 @@ imx_media_capture_device_init(struct device *dev, struct v4l2_subdev *src_sd,
 void imx_media_capture_device_remove(struct imx_media_video_dev *vdev);
 int imx_media_capture_device_register(struct imx_media_video_dev *vdev);
 void imx_media_capture_device_unregister(struct imx_media_video_dev *vdev);
-struct imx_media_buffer *
-imx_media_capture_device_next_buf(struct imx_media_video_dev *vdev);
-void imx_media_capture_device_error(struct imx_media_video_dev *vdev);
 
 /* imx-media-csc-scaler.c */
 struct imx_media_video_dev *
