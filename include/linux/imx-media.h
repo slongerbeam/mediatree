@@ -22,4 +22,10 @@ enum imx_ctrl_id {
 	V4L2_CID_IMX_FIM_ICAP_CHANNEL,
 };
 
+/* These ioctls are internal to the kernel */
+#define IMX_CMD_JOB_READY  _IOR('I', 0, void *)
+#define IMX_CMD_JOB_RUN    _IOW('I', 1, void *)
+#define IMX_CMD_JOB_DONE   _IOW('I', 2, void *)
+#define IMX_CMD_JOB_ABORT  _IOW('I', 3, void *)
+
 #endif
