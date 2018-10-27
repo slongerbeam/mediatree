@@ -713,6 +713,30 @@ struct v4l2_subdev_pad_ops {
 };
 
 /**
+ * struct v4l2_subdev_proc_ops - mem2mem processing subdev operations
+ *
+ * These operations are identical in meaning to 'struct v4l2_m2m_ops'.
+ * A memory-to-memory driver can pass the corresponding m2m operation
+ * down to this processing subdev.
+ *
+ * @device_run: Same meaning as v4l2_m2m_ops.device_run. Should be called
+ *		from the mem-to-mem driver device_run callback.
+ * @job_ready:  Same meaning as v4l2_m2m_ops.job_ready. Should be called
+ *		from the mem-to-mem driver job_ready callback.
+ * @job_done:   This is an additional callback for the mem-to-mem processing
+ *		subdev. The mem-to-mem driver can call it to let the
+ *		processing subdev know when the job has completed.
+ * @job_abort:  Same meaning as v4l2_m2m_ops.job_abort. Should be called
+ *		from the mem-to-mem driver job_abort callback.
+ */
+struct v4l2_subdev_proc_ops {
+	int (*device_run)(struct v4l2_subdev *sd, void *priv);
+	int (*job_ready)(struct v4l2_subdev *sd, void *priv);
+	int (*job_done)(struct v4l2_subdev *sd, void *priv);
+	int (*job_abort)(struct v4l2_subdev *sd, void *priv);
+};
+
+/**
  * struct v4l2_subdev_ops - Subdev operations
  *
  * @core: pointer to &struct v4l2_subdev_core_ops. Can be %NULL
@@ -733,6 +757,7 @@ struct v4l2_subdev_ops {
 	const struct v4l2_subdev_ir_ops		*ir;
 	const struct v4l2_subdev_sensor_ops	*sensor;
 	const struct v4l2_subdev_pad_ops	*pad;
+	const struct v4l2_subdev_proc_ops       *proc;
 };
 
 /**
