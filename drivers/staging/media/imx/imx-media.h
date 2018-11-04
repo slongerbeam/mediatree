@@ -89,7 +89,7 @@ struct imx_media_video_dev {
 
 	/* the user format */
 	struct v4l2_format fmt;
-	/* the compose rectangle */
+	/* the capture compose rectangle */
 	struct v4l2_rect compose;
 	const struct imx_media_pixfmt *cc;
 
@@ -264,16 +264,16 @@ struct v4l2_subdev *imx_media_ic_register(struct v4l2_device *v4l2_dev,
 					  u32 grp_id);
 int imx_media_ic_unregister(struct v4l2_subdev *sd);
 
-/* imx-media-capture.c */
+/* imx-media-video.c */
 struct imx_media_video_dev *
-imx_media_capture_device_init(struct device *dev, struct v4l2_subdev *src_sd,
-			      int pad);
-void imx_media_capture_device_remove(struct imx_media_video_dev *vdev);
-int imx_media_capture_device_register(struct imx_media_video_dev *vdev);
-void imx_media_capture_device_unregister(struct imx_media_video_dev *vdev);
+imx_media_video_device_init(struct device *dev, struct v4l2_subdev *src_sd,
+			    enum v4l2_buf_type type, int pad);
+void imx_media_video_device_remove(struct imx_media_video_dev *vdev);
+int imx_media_video_device_register(struct imx_media_video_dev *vdev);
+void imx_media_video_device_unregister(struct imx_media_video_dev *vdev);
 struct imx_media_buffer *
-imx_media_capture_device_next_buf(struct imx_media_video_dev *vdev);
-void imx_media_capture_device_error(struct imx_media_video_dev *vdev);
+imx_media_video_device_next_buf(struct imx_media_video_dev *vdev);
+void imx_media_video_device_error(struct imx_media_video_dev *vdev);
 
 /* subdev group ids */
 #define IMX_MEDIA_GRP_ID_CSI2          BIT(8)

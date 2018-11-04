@@ -590,7 +590,7 @@ static void imx7_csi_setup_vb2_buf(struct imx7_csi *csi)
 	int i;
 
 	for (i = 0; i < 2; i++) {
-		buf = imx_media_capture_device_next_buf(vdev);
+		buf = imx_media_video_device_next_buf(vdev);
 		if (buf) {
 			csi->active_vb2_buf[i] = buf;
 			vb2_buf = &buf->vbuf.vb2_buf;
@@ -640,7 +640,7 @@ static void imx7_csi_vb2_buf_done(struct imx7_csi *csi)
 	csi->frame_sequence++;
 
 	/* get next queued buffer */
-	next = imx_media_capture_device_next_buf(vdev);
+	next = imx_media_video_device_next_buf(vdev);
 	if (next) {
 		phys = vb2_dma_contig_plane_dma_addr(&next->vbuf.vb2_buf, 0);
 		csi->active_vb2_buf[csi->buf_num] = next;
@@ -1119,14 +1119,14 @@ static int imx7_csi_registered(struct v4l2_subdev *sd)
 	if (ret < 0)
 		return ret;
 
-	return imx_media_capture_device_register(csi->vdev);
+	return imx_media_video_device_register(csi->vdev);
 }
 
 static void imx7_csi_unregistered(struct v4l2_subdev *sd)
 {
 	struct imx7_csi *csi = v4l2_get_subdevdata(sd);
 
-	imx_media_capture_device_unregister(csi->vdev);
+	imx_media_video_device_unregister(csi->vdev);
 }
 
 static int imx7_csi_init_cfg(struct v4l2_subdev *sd,
@@ -1253,8 +1253,9 @@ static int imx7_csi_probe(struct platform_device *pdev)
 	csi->sd.grp_id = IMX_MEDIA_GRP_ID_CSI;
 	snprintf(csi->sd.name, sizeof(csi->sd.name), "csi");
 
-	csi->vdev = imx_media_capture_device_init(csi->sd.dev, &csi->sd,
-						  IMX7_CSI_PAD_SRC);
+	csi->vdev = imx_media_video_device_init(csi->sd.dev, &csi->sd,
+						V4L2_BUF_TYPE_VIDEO_CAPTURE,
+						IMX7_CSI_PAD_SRC);
 	if (IS_ERR(csi->vdev))
 		return PTR_ERR(csi->vdev);
 
@@ -1271,8 +1272,8 @@ static int imx7_csi_probe(struct platform_device *pdev)
 	return 0;
 
 free:
-	imx_media_capture_device_unregister(csi->vdev);
-	imx_media_capture_device_remove(csi->vdev);
+	imx_media_video_device_unregister(csi->vdev);
+	imx_media_video_device_remove(csi->vdev);
 	v4l2_ctrl_handler_free(&csi->ctrl_hdlr);
 
 cleanup:
@@ -1300,8 +1301,8 @@ static int imx7_csi_remove(struct platform_device *pdev)
 	v4l2_device_unregister(&imxmd->v4l2_dev);
 	media_device_cleanup(&imxmd->md);
 
-	imx_media_capture_device_unregister(csi->vdev);
-	imx_media_capture_device_remove(csi->vdev);
+	imx_media_video_device_unregister(csi->vdev);
+	imx_media_video_device_remove(csi->vdev);
 
 	v4l2_async_unregister_subdev(sd);
 	v4l2_ctrl_handler_free(&csi->ctrl_hdlr);

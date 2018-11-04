@@ -216,7 +216,7 @@ static void prp_vb2_buf_done(struct prp_priv *priv, struct ipuv3_channel *ch)
 	priv->nfb4eof = false;
 
 	/* get next queued buffer */
-	next = imx_media_capture_device_next_buf(vdev);
+	next = imx_media_video_device_next_buf(vdev);
 	if (next) {
 		phys = vb2_dma_contig_plane_dma_addr(&next->vbuf.vb2_buf, 0);
 		priv->active_vb2_buf[priv->ipu_buf_num] = next;
@@ -302,7 +302,7 @@ static void prp_eof_timeout(struct timer_list *t)
 	v4l2_err(&ic_priv->sd, "EOF timeout\n");
 
 	/* signal a fatal error to capture device */
-	imx_media_capture_device_error(vdev);
+	imx_media_video_device_error(vdev);
 }
 
 static void prp_setup_vb2_buf(struct prp_priv *priv, dma_addr_t *phys)
@@ -312,7 +312,7 @@ static void prp_setup_vb2_buf(struct prp_priv *priv, dma_addr_t *phys)
 	int i;
 
 	for (i = 0; i < 2; i++) {
-		buf = imx_media_capture_device_next_buf(vdev);
+		buf = imx_media_video_device_next_buf(vdev);
 		if (buf) {
 			priv->active_vb2_buf[i] = buf;
 			phys[i] = vb2_dma_contig_plane_dma_addr(
@@ -1271,7 +1271,7 @@ static int prp_registered(struct v4l2_subdev *sd)
 	if (ret)
 		return ret;
 
-	ret = imx_media_capture_device_register(priv->vdev);
+	ret = imx_media_video_device_register(priv->vdev);
 	if (ret)
 		return ret;
 
@@ -1281,7 +1281,7 @@ static int prp_registered(struct v4l2_subdev *sd)
 
 	return 0;
 unreg:
-	imx_media_capture_device_unregister(priv->vdev);
+	imx_media_video_device_unregister(priv->vdev);
 	return ret;
 }
 
@@ -1289,7 +1289,7 @@ static void prp_unregistered(struct v4l2_subdev *sd)
 {
 	struct prp_priv *priv = sd_to_priv(sd);
 
-	imx_media_capture_device_unregister(priv->vdev);
+	imx_media_video_device_unregister(priv->vdev);
 	v4l2_ctrl_handler_free(&priv->ctrl_hdlr);
 }
 
@@ -1336,9 +1336,10 @@ static int prp_init(struct imx_ic_priv *ic_priv)
 	spin_lock_init(&priv->irqlock);
 	timer_setup(&priv->eof_timeout_timer, prp_eof_timeout, 0);
 
-	priv->vdev = imx_media_capture_device_init(ic_priv->ipu_dev,
-						   &ic_priv->sd,
-						   PRPENCVF_SRC_PAD);
+	priv->vdev = imx_media_video_device_init(ic_priv->ipu_dev,
+						 &ic_priv->sd,
+						 V4L2_BUF_TYPE_VIDEO_CAPTURE,
+						 PRPENCVF_SRC_PAD);
 	if (IS_ERR(priv->vdev))
 		return PTR_ERR(priv->vdev);
 
@@ -1352,7 +1353,7 @@ static void prp_remove(struct imx_ic_priv *ic_priv)
 	struct prp_priv *priv = ic_priv->task_priv;
 
 	mutex_destroy(&priv->lock);
-	imx_media_capture_device_remove(priv->vdev);
+	imx_media_video_device_remove(priv->vdev);
 }
 
 struct imx_ic_ops imx_ic_prpencvf_ops = {
