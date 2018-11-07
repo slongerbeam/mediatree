@@ -631,7 +631,7 @@ static const struct vb2_ops capture_qops = {
 static int capture_open(struct file *file)
 {
 	struct capture_priv *priv = video_drvdata(file);
-	struct video_device *vfd = priv->vdev.vfd;
+	struct video_device *vfd = &priv->vdev.vfd;
 	int ret;
 
 	if (mutex_lock_interruptible(&priv->mutex))
@@ -652,7 +652,7 @@ static int capture_open(struct file *file)
 static int capture_release(struct file *file)
 {
 	struct capture_priv *priv = video_drvdata(file);
-	struct video_device *vfd = priv->vdev.vfd;
+	struct video_device *vfd = &priv->vdev.vfd;
 	struct vb2_queue *vq = &priv->q;
 
 	mutex_lock(&priv->mutex);
@@ -682,7 +682,7 @@ static struct video_device capture_videodev = {
 	.fops		= &capture_fops,
 	.ioctl_ops	= &capture_ioctl_ops,
 	.minor		= -1,
-	.release	= video_device_release,
+	.release	= video_device_release_empty,
 	.vfl_dir	= VFL_DIR_RX,
 	.tvnorms	= V4L2_STD_NTSC | V4L2_STD_PAL | V4L2_STD_SECAM,
 	.device_caps	= V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_STREAMING,
@@ -730,7 +730,7 @@ int imx_media_capture_device_register(struct imx_media_video_dev *vdev)
 	struct capture_priv *priv = to_capture_priv(vdev);
 	struct v4l2_subdev *sd = priv->src_sd;
 	struct v4l2_device *v4l2_dev = sd->v4l2_dev;
-	struct video_device *vfd = vdev->vfd;
+	struct video_device *vfd = &vdev->vfd;
 	struct vb2_queue *vq = &priv->q;
 	struct v4l2_subdev_format fmt_src;
 	int ret;
@@ -815,7 +815,7 @@ EXPORT_SYMBOL_GPL(imx_media_capture_device_register);
 void imx_media_capture_device_unregister(struct imx_media_video_dev *vdev)
 {
 	struct capture_priv *priv = to_capture_priv(vdev);
-	struct video_device *vfd = priv->vdev.vfd;
+	struct video_device *vfd = &priv->vdev.vfd;
 
 	mutex_lock(&priv->mutex);
 
@@ -849,14 +849,10 @@ imx_media_capture_device_init(struct device *dev, struct v4l2_subdev *src_sd,
 	snprintf(capture_videodev.name, sizeof(capture_videodev.name),
 		 "%s capture", src_sd->name);
 
-	vfd = video_device_alloc();
-	if (!vfd)
-		return ERR_PTR(-ENOMEM);
-
+	vfd = &priv->vdev.vfd;
 	*vfd = capture_videodev;
 	vfd->lock = &priv->mutex;
 	vfd->queue = &priv->q;
-	priv->vdev.vfd = vfd;
 
 	INIT_LIST_HEAD(&priv->vdev.list);
 

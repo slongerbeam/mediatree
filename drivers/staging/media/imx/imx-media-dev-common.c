@@ -106,7 +106,7 @@ static int imx_media_add_vdev_to_pad(struct imx_media_dev *imxmd,
 	}
 
 	dev_dbg(imxmd->md.dev, "adding %s to pad %s:%u\n",
-		vdev->vfd->entity.name, entity->name, srcpad->index);
+		vdev->vfd.entity.name, entity->name, srcpad->index);
 
 	pad_vdev = devm_kzalloc(imxmd->md.dev, sizeof(*pad_vdev), GFP_KERNEL);
 	if (!pad_vdev)
@@ -178,7 +178,7 @@ static int imx_media_create_pad_vdev_lists(struct imx_media_dev *imxmd)
 		return ret;
 
 	list_for_each_entry(vdev, &imxmd->vdev_list, list) {
-		link = list_first_entry(&vdev->vfd->entity.links,
+		link = list_first_entry(&vdev->vfd.entity.links,
 					struct media_link, list);
 		ret = imx_media_add_vdev_to_pad(imxmd, vdev, link->source);
 		if (ret)
@@ -296,7 +296,7 @@ static int imx_media_link_notify(struct media_link *link, u32 flags,
 	if (notification == MEDIA_DEV_NOTIFY_PRE_LINK_CH &&
 	    !(flags & MEDIA_LNK_FL_ENABLED)) {
 		list_for_each_entry(pad_vdev, pad_vdev_list, list) {
-			vfd = pad_vdev->vdev->vfd;
+			vfd = &pad_vdev->vdev->vfd;
 			dev_dbg(imxmd->md.dev,
 				"reset controls for %s\n",
 				vfd->entity.name);
@@ -306,7 +306,7 @@ static int imx_media_link_notify(struct media_link *link, u32 flags,
 	} else if (notification == MEDIA_DEV_NOTIFY_POST_LINK_CH &&
 		   (link->flags & MEDIA_LNK_FL_ENABLED)) {
 		list_for_each_entry(pad_vdev, pad_vdev_list, list) {
-			vfd = pad_vdev->vdev->vfd;
+			vfd = &pad_vdev->vdev->vfd;
 			dev_dbg(imxmd->md.dev,
 				"refresh controls for %s\n",
 				vfd->entity.name);
@@ -338,7 +338,7 @@ static void imx_media_notify(struct v4l2_subdev *sd, unsigned int notification,
 		if (!pad_vdev_list)
 			continue;
 		list_for_each_entry(pad_vdev, pad_vdev_list, list)
-			v4l2_event_queue(pad_vdev->vdev->vfd, arg);
+			v4l2_event_queue(&pad_vdev->vdev->vfd, arg);
 	}
 }
 

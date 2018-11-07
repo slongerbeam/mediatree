@@ -85,7 +85,7 @@ struct imx_media_buffer {
 };
 
 struct imx_media_video_dev {
-	struct video_device *vfd;
+	struct video_device vfd;
 
 	/* the user format */
 	struct v4l2_format fmt;
@@ -96,6 +96,12 @@ struct imx_media_video_dev {
 	/* links this vdev to master list */
 	struct list_head list;
 };
+
+static inline struct imx_media_video_dev *
+to_imx_media_video_dev(struct video_device *vfd)
+{
+	return container_of(vfd, struct imx_media_video_dev, vfd);
+}
 
 static inline struct imx_media_buffer *to_imx_media_vb(struct vb2_buffer *vb)
 {
