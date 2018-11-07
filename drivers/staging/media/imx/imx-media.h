@@ -67,6 +67,16 @@ enum {
 /* How long to wait for EOF interrupts in the buffer-capture subdevs */
 #define IMX_MEDIA_EOF_TIMEOUT       1000
 
+/*
+ * Internal signals sent by video device to its connected sub-device
+ * via interrupt_service_routine subdev_call.
+ */
+enum {
+	IMX_SUBDEV_BUF_STATE_READY  = BIT(16),
+	IMX_SUBDEV_BUF_STATE_DONE   = BIT(17),
+	IMX_SUBDEV_BUF_STATE_MASK   = (0x3 << 16),
+};
+
 struct imx_media_pixfmt {
 	u32     fourcc;
 	u32     codes[4];
@@ -86,6 +96,8 @@ struct imx_media_buffer {
 
 struct imx_media_video_dev {
 	struct video_device vfd;
+	/* for memory-to-memory pipelines */
+	struct video_device *remote_vfd;
 
 	/* the user format */
 	struct v4l2_format fmt;

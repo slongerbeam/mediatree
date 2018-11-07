@@ -450,6 +450,27 @@ static int imx_vdev_subscribe_event(struct v4l2_fh *fh,
 	}
 }
 
+static int imx_vdev_qbuf(struct file *file, void *fh,
+			 struct v4l2_buffer *p)
+{
+	struct imx_video_priv *priv = video_drvdata(file);
+	struct vb2_queue *vq = &priv->q;
+	int ret;
+
+	ret = vb2_ioctl_qbuf(file, priv, p);
+	if (ret)
+		return ret;
+
+	if (vb2_is_streaming(vq)) {
+		ret = v4l2_subdev_call(priv->sd, core,
+				       interrupt_service_routine,
+				       IMX_SUBDEV_BUF_STATE_READY, NULL);
+		ret = (ret && ret != -ENOIOCTLCMD) ? ret : 0;
+	}
+
+	return ret;
+}
+
 static const struct v4l2_ioctl_ops imx_vdev_ioctl_ops = {
 	.vidioc_querycap	= vidioc_querycap,
 
@@ -479,7 +500,7 @@ static const struct v4l2_ioctl_ops imx_vdev_ioctl_ops = {
 	.vidioc_create_bufs     = vb2_ioctl_create_bufs,
 	.vidioc_prepare_buf     = vb2_ioctl_prepare_buf,
 	.vidioc_querybuf	= vb2_ioctl_querybuf,
-	.vidioc_qbuf		= vb2_ioctl_qbuf,
+	.vidioc_qbuf		= imx_vdev_qbuf,
 	.vidioc_dqbuf		= vb2_ioctl_dqbuf,
 	.vidioc_expbuf		= vb2_ioctl_expbuf,
 	.vidioc_streamon	= vb2_ioctl_streamon,
@@ -601,6 +622,9 @@ static int imx_vdev_start_streaming(struct vb2_queue *vq, unsigned int count)
 {
 	struct imx_video_priv *priv = vb2_get_drv_priv(vq);
 	struct imx_media_buffer *buf, *tmp;
+	struct video_device *remote_vfd;
+	enum v4l2_buf_type remote_type;
+	bool remote_is_upstream;
 	unsigned long flags;
 	int ret;
 
@@ -609,6 +633,19 @@ static int imx_vdev_start_streaming(struct vb2_queue *vq, unsigned int count)
 		v4l2_err(priv->sd, "format not valid\n");
 		goto return_bufs;
 	}
+
+	if (priv->type == V4L2_BUF_TYPE_VIDEO_CAPTURE) {
+		remote_type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+		remote_is_upstream = true;
+	} else {
+		remote_type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		remote_is_upstream = false;
+	}
+
+	remote_vfd = imx_media_pipeline_video_device(&priv->sd->entity,
+						     remote_type,
+						     remote_is_upstream);
+	priv->vdev.remote_vfd = !IS_ERR(remote_vfd) ? remote_vfd : NULL;
 
 	/*
 	 * in a memory-to-memory pipeline, capture side starts the
@@ -766,14 +803,42 @@ void imx_media_video_device_buf_done(struct imx_media_video_dev *vdev,
 	struct vb2_buffer *vb;
 	unsigned long flags;
 
-	spin_lock_irqsave(&priv->q_lock, flags);
+	if (!buf) {
+		if (priv->type == V4L2_BUF_TYPE_VIDEO_OUTPUT) {
+			/*
+			 * in a memory-to-memory pipeline, this means the
+			 * far-end capture video device completed a buffer,
+			 * and is informing this output video device.
+			 * Let the (vdic) subdev know that the capture
+			 * device has completed a buffer.
+			 */
+			v4l2_subdev_call(priv->sd, core,
+					 interrupt_service_routine,
+					 status | IMX_SUBDEV_BUF_STATE_DONE,
+					 NULL);
+		}
+	} else {
+		spin_lock_irqsave(&priv->q_lock, flags);
 
-	buf->vbuf.field = vdev->fmt.fmt.pix.field;
-	vb = &buf->vbuf.vb2_buf;
-	vb->timestamp = ktime_get_ns();
-	vb2_buffer_done(vb, status);
+		buf->vbuf.field = vdev->fmt.fmt.pix.field;
+		vb = &buf->vbuf.vb2_buf;
+		vb->timestamp = ktime_get_ns();
+		vb2_buffer_done(vb, status);
 
-	spin_unlock_irqrestore(&priv->q_lock, flags);
+		spin_unlock_irqrestore(&priv->q_lock, flags);
+	}
+
+	/*
+	 * in a memory-to-memory pipeline, inform far-end output video
+	 * device that we completed a buffer.
+	 */
+	if (priv->vdev.remote_vfd &&
+	    priv->type == V4L2_BUF_TYPE_VIDEO_CAPTURE) {
+		struct imx_media_video_dev *remote_vdev =
+			to_imx_media_video_dev(priv->vdev.remote_vfd);
+
+		imx_media_video_device_buf_done(remote_vdev, NULL, status);
+	}
 }
 EXPORT_SYMBOL_GPL(imx_media_video_device_buf_done);
 

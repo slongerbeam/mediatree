@@ -202,13 +202,12 @@ static void prp_vb2_buf_done(struct prp_priv *priv, struct ipuv3_channel *ch)
 	dma_addr_t phys;
 
 	done = priv->active_vb2_buf[priv->ipu_buf_num];
-	if (done) {
+	if (done)
 		done->vbuf.sequence = priv->frame_sequence;
-		imx_media_video_device_buf_done(vdev, done,
-						priv->nfb4eof ?
-						VB2_BUF_STATE_ERROR :
-						VB2_BUF_STATE_DONE);
-	}
+
+	imx_media_video_device_buf_done(vdev, done, priv->nfb4eof ?
+					VB2_BUF_STATE_ERROR :
+					VB2_BUF_STATE_DONE);
 
 	priv->frame_sequence++;
 	priv->nfb4eof = false;
@@ -235,6 +234,7 @@ static void prp_vb2_buf_done(struct prp_priv *priv, struct ipuv3_channel *ch)
 static irqreturn_t prp_eof_interrupt(int irq, void *dev_id)
 {
 	struct prp_priv *priv = dev_id;
+	struct imx_media_video_dev *vdev = priv->vdev;
 	struct ipuv3_channel *channel;
 
 	spin_lock(&priv->irqlock);
@@ -255,9 +255,10 @@ static irqreturn_t prp_eof_interrupt(int irq, void *dev_id)
 	/* toggle IPU double-buffer index */
 	priv->ipu_buf_num ^= 1;
 
-	/* bump the EOF timeout timer */
-	mod_timer(&priv->eof_timeout_timer,
-		  jiffies + msecs_to_jiffies(IMX_MEDIA_EOF_TIMEOUT));
+	/* bump the EOF timeout timer (not used for mem-to-mem pipelines) */
+	if (!vdev->remote_vfd)
+		mod_timer(&priv->eof_timeout_timer,
+			  jiffies + msecs_to_jiffies(IMX_MEDIA_EOF_TIMEOUT));
 
 unlock:
 	spin_unlock(&priv->irqlock);
@@ -727,9 +728,10 @@ static int prp_start(struct prp_priv *priv)
 		goto out_free_eof_irq;
 	}
 
-	/* start the EOF timeout timer */
-	mod_timer(&priv->eof_timeout_timer,
-		  jiffies + msecs_to_jiffies(IMX_MEDIA_EOF_TIMEOUT));
+	/* start the EOF timeout timer (but not for mem-to-mem piplines) */
+	if (!vdev->remote_vfd)
+		mod_timer(&priv->eof_timeout_timer,
+			  jiffies + msecs_to_jiffies(IMX_MEDIA_EOF_TIMEOUT));
 
 	return 0;
 
@@ -748,6 +750,7 @@ out_put_ipu:
 
 static void prp_stop(struct prp_priv *priv)
 {
+	struct imx_media_video_dev *vdev = priv->vdev;
 	struct imx_ic_priv *ic_priv = priv->ic_priv;
 	unsigned long flags;
 	int ret;
@@ -763,7 +766,7 @@ static void prp_stop(struct prp_priv *priv)
 	ret = wait_for_completion_timeout(
 		&priv->last_eof_comp,
 		msecs_to_jiffies(IMX_MEDIA_EOF_TIMEOUT));
-	if (ret == 0)
+	if (!vdev->remote_vfd && ret == 0)
 		v4l2_warn(&ic_priv->sd, "wait last EOF timeout\n");
 
 	/* stop upstream */
@@ -780,7 +783,8 @@ static void prp_stop(struct prp_priv *priv)
 	imx_media_free_dma_buf(ic_priv->ipu_dev, &priv->underrun_buf);
 
 	/* cancel the EOF timeout timer */
-	del_timer_sync(&priv->eof_timeout_timer);
+	if (!vdev->remote_vfd)
+		del_timer_sync(&priv->eof_timeout_timer);
 
 	prp_put_ipu_resources(priv);
 }
