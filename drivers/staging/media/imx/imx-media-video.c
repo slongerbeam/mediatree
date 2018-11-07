@@ -758,6 +758,25 @@ imx_media_video_device_next_buf(struct imx_media_video_dev *vdev)
 }
 EXPORT_SYMBOL_GPL(imx_media_video_device_next_buf);
 
+void imx_media_video_device_buf_done(struct imx_media_video_dev *vdev,
+				     struct imx_media_buffer *buf,
+				     enum vb2_buffer_state status)
+{
+	struct imx_video_priv *priv = to_imx_video_priv(vdev);
+	struct vb2_buffer *vb;
+	unsigned long flags;
+
+	spin_lock_irqsave(&priv->q_lock, flags);
+
+	buf->vbuf.field = vdev->fmt.fmt.pix.field;
+	vb = &buf->vbuf.vb2_buf;
+	vb->timestamp = ktime_get_ns();
+	vb2_buffer_done(vb, status);
+
+	spin_unlock_irqrestore(&priv->q_lock, flags);
+}
+EXPORT_SYMBOL_GPL(imx_media_video_device_buf_done);
+
 void imx_media_video_device_error(struct imx_media_video_dev *vdev)
 {
 	struct imx_video_priv *priv = to_imx_video_priv(vdev);

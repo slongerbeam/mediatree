@@ -273,6 +273,9 @@ int imx_media_video_device_register(struct imx_media_video_dev *vdev);
 void imx_media_video_device_unregister(struct imx_media_video_dev *vdev);
 struct imx_media_buffer *
 imx_media_video_device_next_buf(struct imx_media_video_dev *vdev);
+void imx_media_video_device_buf_done(struct imx_media_video_dev *vdev,
+				     struct imx_media_buffer *buf,
+				     enum vb2_buffer_state status);
 void imx_media_video_device_error(struct imx_media_video_dev *vdev);
 
 /* subdev group ids */

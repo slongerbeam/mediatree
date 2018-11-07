@@ -263,17 +263,15 @@ static void csi_vb2_buf_done(struct csi_priv *priv)
 {
 	struct imx_media_video_dev *vdev = priv->vdev;
 	struct imx_media_buffer *done, *next;
-	struct vb2_buffer *vb;
 	dma_addr_t phys;
 
 	done = priv->active_vb2_buf[priv->ipu_buf_num];
 	if (done) {
-		done->vbuf.field = vdev->fmt.fmt.pix.field;
 		done->vbuf.sequence = priv->frame_sequence;
-		vb = &done->vbuf.vb2_buf;
-		vb->timestamp = ktime_get_ns();
-		vb2_buffer_done(vb, priv->nfb4eof ?
-				VB2_BUF_STATE_ERROR : VB2_BUF_STATE_DONE);
+		imx_media_video_device_buf_done(vdev, done,
+						priv->nfb4eof ?
+						VB2_BUF_STATE_ERROR :
+						VB2_BUF_STATE_DONE);
 	}
 
 	priv->frame_sequence++;
@@ -386,18 +384,16 @@ static void csi_idmac_setup_vb2_buf(struct csi_priv *priv, dma_addr_t *phys)
 static void csi_idmac_unsetup_vb2_buf(struct csi_priv *priv,
 				      enum vb2_buffer_state return_status)
 {
+	struct imx_media_video_dev *vdev = priv->vdev;
 	struct imx_media_buffer *buf;
 	int i;
 
 	/* return any remaining active frames with return_status */
 	for (i = 0; i < 2; i++) {
 		buf = priv->active_vb2_buf[i];
-		if (buf) {
-			struct vb2_buffer *vb = &buf->vbuf.vb2_buf;
-
-			vb->timestamp = ktime_get_ns();
-			vb2_buffer_done(vb, return_status);
-		}
+		if (buf)
+			imx_media_video_device_buf_done(vdev, buf,
+							return_status);
 	}
 }
 
