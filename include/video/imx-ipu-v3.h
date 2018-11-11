@@ -470,6 +470,7 @@ int ipu_vdi_enable(struct ipu_vdi *vdi);
 int ipu_vdi_disable(struct ipu_vdi *vdi);
 struct ipu_vdi *ipu_vdi_get(struct ipu_soc *ipu);
 void ipu_vdi_put(struct ipu_vdi *vdi);
+void ipu_vdi_dump(struct ipu_vdi *vdi);
 
 /*
  * IPU Sensor Multiple FIFO Controller (SMFC) functions

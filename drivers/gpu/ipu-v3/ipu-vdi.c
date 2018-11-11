@@ -195,6 +195,15 @@ int ipu_vdi_disable(struct ipu_vdi *vdi)
 }
 EXPORT_SYMBOL_GPL(ipu_vdi_disable);
 
+void ipu_vdi_dump(struct ipu_vdi *vdi)
+{
+	dev_dbg(vdi->ipu->dev, "VDI_FSIZE: %08x\n",
+		ipu_vdi_read(vdi, VDI_FSIZE));
+	dev_dbg(vdi->ipu->dev, "VDI_C:     %08x\n",
+		ipu_vdi_read(vdi, VDI_C));
+}
+EXPORT_SYMBOL_GPL(ipu_vdi_dump);
+
 struct ipu_vdi *ipu_vdi_get(struct ipu_soc *ipu)
 {
 	return ipu->vdi_priv;
