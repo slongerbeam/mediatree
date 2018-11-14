@@ -1360,9 +1360,12 @@ void ipu_dump(struct ipu_soc *ipu)
 		ipu_cm_read(ipu, IPU_FS_PROC_FLOW3));
 	dev_dbg(ipu->dev, "IPU_FS_DISP_FLOW1 = \t0x%08X\n",
 		ipu_cm_read(ipu, IPU_FS_DISP_FLOW1));
-	for (i = 0; i < 15; i++)
+	for (i = 0; i < 15; i++) {
+		dev_dbg(ipu->dev, "IPU_INT_STAT(%d) = \t%08X\n", i,
+			ipu_cm_read(ipu, IPU_INT_STAT(i)));
 		dev_dbg(ipu->dev, "IPU_INT_CTRL(%d) = \t%08X\n", i,
 			ipu_cm_read(ipu, IPU_INT_CTRL(i)));
+	}
 }
 EXPORT_SYMBOL_GPL(ipu_dump);
 
