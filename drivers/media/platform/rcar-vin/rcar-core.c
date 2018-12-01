@@ -762,9 +762,12 @@ static int rvin_mc_parse_of_endpoint(struct device *dev,
 		return -ENOTCONN;
 	}
 
+	mutex_lock(&vin->group->lock);
+
 	if (vin->group->csi[vep->base.id].fwnode) {
 		vin_dbg(vin, "OF device %pOF already handled\n",
 			to_of_node(asd->match.fwnode));
+		mutex_unlock(&vin->group->lock);
 		return -ENOTCONN;
 	}
 
@@ -772,6 +775,8 @@ static int rvin_mc_parse_of_endpoint(struct device *dev,
 
 	vin_dbg(vin, "Add group OF device %pOF to slot %u\n",
 		to_of_node(asd->match.fwnode), vep->base.id);
+
+	mutex_unlock(&vin->group->lock);
 
 	return 0;
 }
@@ -802,17 +807,23 @@ static int rvin_mc_parse_of_graph(struct rvin_dev *vin)
 	 * will only be registered once with the group notifier.
 	 */
 	for (i = 0; i < RCAR_VIN_NUM; i++) {
+		struct device *dev;
+
 		if (!vin->group->vin[i])
 			continue;
 
+		dev = vin->group->vin[i]->dev;
+
+		mutex_unlock(&vin->group->lock);
+
 		ret = v4l2_async_notifier_parse_fwnode_endpoints_by_port(
-				vin->group->vin[i]->dev, &vin->group->notifier,
+				dev, &vin->group->notifier,
 				sizeof(struct v4l2_async_subdev), 1,
 				rvin_mc_parse_of_endpoint);
-		if (ret) {
-			mutex_unlock(&vin->group->lock);
+		if (ret)
 			return ret;
-		}
+
+		mutex_lock(&vin->group->lock);
 	}
 
 	mutex_unlock(&vin->group->lock);
