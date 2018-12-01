@@ -48,7 +48,6 @@
  * Media Controller link notification
  */
 
-/* group lock should be held when calling this function. */
 static int rvin_group_entity_to_csi_id(struct rvin_group *group,
 				       struct media_entity *entity)
 {
@@ -140,17 +139,13 @@ static int rvin_group_link_notify(struct media_link *link, u32 flags,
 		if (entity->stream_count)
 			return -EBUSY;
 
-	mutex_lock(&group->lock);
-
 	/* Find the master VIN that controls the routes. */
 	vdev = media_entity_to_video_device(link->sink->entity);
 	vin = container_of(vdev, struct rvin_dev, vdev);
 	master_id = rvin_group_id_to_master(vin->id);
 
-	if (WARN_ON(!group->vin[master_id])) {
-		ret = -ENODEV;
-		goto out;
-	}
+	if (WARN_ON(!group->vin[master_id]))
+		return -ENODEV;
 
 	/* Build a mask for already enabled links. */
 	for (i = master_id; i < master_id + 4; i++) {
@@ -188,37 +183,30 @@ static int rvin_group_link_notify(struct media_link *link, u32 flags,
 			if (group->vin[i] && group->vin[i]->parallel &&
 			    group->vin[i]->parallel->subdev == sd) {
 				group->vin[i]->is_csi = false;
-				ret = 0;
-				goto out;
+				return 0;
 			}
 		}
 
 		vin_err(vin, "Subdevice %s not registered to any VIN\n",
 			link->source->entity->name);
-		ret = -ENODEV;
-		goto out;
+		return -ENODEV;
 	}
 
 	channel = rvin_group_csi_pad_to_channel(link->source->index);
 	mask_new = mask & rvin_group_get_mask(vin, csi_id, channel);
 	vin_dbg(vin, "Try link change mask: 0x%x new: 0x%x\n", mask, mask_new);
 
-	if (!mask_new) {
-		ret = -EMLINK;
-		goto out;
-	}
+	if (!mask_new)
+		return -EMLINK;
 
 	/* New valid CHSEL found, set the new value. */
 	ret = rvin_set_channel_routing(group->vin[master_id], __ffs(mask_new));
 	if (ret)
-		goto out;
+		return ret;
 
 	vin->is_csi = true;
 
-out:
-	mutex_unlock(&group->lock);
-
-	return ret;
+	return 0;
 }
 
 static const struct media_device_ops rvin_media_ops = {
@@ -245,7 +233,6 @@ static void rvin_group_cleanup(struct rvin_group *group)
 {
 	media_device_unregister(&group->mdev);
 	media_device_cleanup(&group->mdev);
-	mutex_destroy(&group->lock);
 }
 
 static int rvin_group_init(struct rvin_group *group, struct rvin_dev *vin)
@@ -254,8 +241,6 @@ static int rvin_group_init(struct rvin_group *group, struct rvin_dev *vin)
 	const struct of_device_id *match;
 	struct device_node *np;
 	int ret;
-
-	mutex_init(&group->lock);
 
 	/* Count number of VINs in the system */
 	group->count = 0;
@@ -347,11 +332,11 @@ static int rvin_group_get(struct rvin_dev *vin)
 	mutex_unlock(&rvin_group_lock);
 
 	/* Add VIN to group */
-	mutex_lock(&group->lock);
+	mutex_lock(&group->mdev.graph_mutex);
 
 	if (group->vin[id]) {
 		vin_err(vin, "Duplicate renesas,id property value %u\n", id);
-		mutex_unlock(&group->lock);
+		mutex_unlock(&group->mdev.graph_mutex);
 		kref_put(&group->refcount, rvin_group_release);
 		return -EINVAL;
 	}
@@ -362,7 +347,7 @@ static int rvin_group_get(struct rvin_dev *vin)
 	vin->group = group;
 	vin->v4l2_dev.mdev = &group->mdev;
 
-	mutex_unlock(&group->lock);
+	mutex_unlock(&group->mdev.graph_mutex);
 
 	return 0;
 err_group:
@@ -373,8 +358,9 @@ err_group:
 static void rvin_group_put(struct rvin_dev *vin)
 {
 	struct rvin_group *group = vin->group;
+	struct media_device *mdev = &group->mdev;
 
-	mutex_lock(&group->lock);
+	mutex_lock(&mdev->graph_mutex);
 
 	vin->group = NULL;
 	vin->v4l2_dev.mdev = NULL;
@@ -384,7 +370,7 @@ static void rvin_group_put(struct rvin_dev *vin)
 
 	group->vin[vin->id] = NULL;
 out:
-	mutex_unlock(&group->lock);
+	mutex_unlock(&mdev->graph_mutex);
 
 	kref_put(&group->refcount, rvin_group_release);
 }
@@ -752,6 +738,7 @@ static int rvin_mc_parse_of_endpoint(struct device *dev,
 				     struct v4l2_async_subdev *asd)
 {
 	struct rvin_dev *vin = dev_get_drvdata(dev);
+	struct media_device *mdev = &vin->group->mdev;
 
 	if (vep->base.port != 1 || vep->base.id >= RVIN_CSI_MAX)
 		return -EINVAL;
@@ -762,12 +749,12 @@ static int rvin_mc_parse_of_endpoint(struct device *dev,
 		return -ENOTCONN;
 	}
 
-	mutex_lock(&vin->group->lock);
+	mutex_lock(&mdev->graph_mutex);
 
 	if (vin->group->csi[vep->base.id].fwnode) {
 		vin_dbg(vin, "OF device %pOF already handled\n",
 			to_of_node(asd->match.fwnode));
-		mutex_unlock(&vin->group->lock);
+		mutex_unlock(&mdev->graph_mutex);
 		return -ENOTCONN;
 	}
 
@@ -776,18 +763,19 @@ static int rvin_mc_parse_of_endpoint(struct device *dev,
 	vin_dbg(vin, "Add group OF device %pOF to slot %u\n",
 		to_of_node(asd->match.fwnode), vep->base.id);
 
-	mutex_unlock(&vin->group->lock);
+	mutex_unlock(&mdev->graph_mutex);
 
 	return 0;
 }
 
 static int rvin_mc_parse_of_graph(struct rvin_dev *vin)
 {
+	struct media_device *mdev = &vin->group->mdev;
 	unsigned int count = 0;
 	unsigned int i;
 	int ret;
 
-	mutex_lock(&vin->group->lock);
+	mutex_lock(&mdev->graph_mutex);
 
 	/* If not all VIN's are registered don't register the notifier. */
 	for (i = 0; i < RCAR_VIN_NUM; i++)
@@ -795,7 +783,7 @@ static int rvin_mc_parse_of_graph(struct rvin_dev *vin)
 			count++;
 
 	if (vin->group->count != count) {
-		mutex_unlock(&vin->group->lock);
+		mutex_unlock(&mdev->graph_mutex);
 		return 0;
 	}
 
@@ -814,7 +802,7 @@ static int rvin_mc_parse_of_graph(struct rvin_dev *vin)
 
 		dev = vin->group->vin[i]->dev;
 
-		mutex_unlock(&vin->group->lock);
+		mutex_unlock(&mdev->graph_mutex);
 
 		ret = v4l2_async_notifier_parse_fwnode_endpoints_by_port(
 				dev, &vin->group->notifier,
@@ -823,10 +811,10 @@ static int rvin_mc_parse_of_graph(struct rvin_dev *vin)
 		if (ret)
 			return ret;
 
-		mutex_lock(&vin->group->lock);
+		mutex_lock(&mdev->graph_mutex);
 	}
 
-	mutex_unlock(&vin->group->lock);
+	mutex_unlock(&mdev->graph_mutex);
 
 	if (list_empty(&vin->group->notifier.asd_list))
 		return 0;
@@ -1275,12 +1263,14 @@ static int rcar_vin_probe(struct platform_device *pdev)
 
 error_group_unregister:
 	if (vin->info->use_mc) {
-		mutex_lock(&vin->group->lock);
+		struct media_device *mdev = &vin->group->mdev;
+
+		mutex_lock(&mdev->graph_mutex);
 		if (&vin->v4l2_dev == vin->group->notifier.v4l2_dev) {
 			v4l2_async_notifier_unregister(&vin->group->notifier);
 			v4l2_async_notifier_cleanup(&vin->group->notifier);
 		}
-		mutex_unlock(&vin->group->lock);
+		mutex_unlock(&mdev->graph_mutex);
 		rvin_group_put(vin);
 	}
 
@@ -1302,12 +1292,14 @@ static int rcar_vin_remove(struct platform_device *pdev)
 	v4l2_async_notifier_cleanup(&vin->notifier);
 
 	if (vin->info->use_mc) {
-		mutex_lock(&vin->group->lock);
+		struct media_device *mdev = &vin->group->mdev;
+
+		mutex_lock(&mdev->graph_mutex);
 		if (&vin->v4l2_dev == vin->group->notifier.v4l2_dev) {
 			v4l2_async_notifier_unregister(&vin->group->notifier);
 			v4l2_async_notifier_cleanup(&vin->group->notifier);
 		}
-		mutex_unlock(&vin->group->lock);
+		mutex_unlock(&mdev->graph_mutex);
 		rvin_group_put(vin);
 	} else {
 		v4l2_ctrl_handler_free(&vin->ctrl_handler);
