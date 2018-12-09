@@ -1223,6 +1223,32 @@ static int prp_s_frame_interval(struct v4l2_subdev *sd,
 	return 0;
 }
 
+static int prp_enum_frame_interval(struct v4l2_subdev *sd,
+				   struct v4l2_subdev_pad_config *cfg,
+				   struct v4l2_subdev_frame_interval_enum *fie)
+{
+	struct prp_priv *priv = sd_to_priv(sd);
+	struct v4l2_mbus_framefmt *fmt;
+	int ret = 0;
+
+	if (fie->pad >= PRPENCVF_NUM_PADS || fie->index != 0)
+		return -EINVAL;
+
+	mutex_lock(&priv->lock);
+
+	fmt = __prp_get_fmt(priv, cfg, fie->pad, fie->which);
+
+	if (fie->width != fmt->width || fie->height != fmt->height) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	fie->interval = priv->frame_interval;
+out:
+	mutex_unlock(&priv->lock);
+	return ret;
+}
+
 /*
  * retrieve our pads parsed from the OF graph by the media device
  */
@@ -1287,6 +1313,7 @@ static const struct v4l2_subdev_pad_ops prp_pad_ops = {
 	.init_cfg = imx_media_init_cfg,
 	.enum_mbus_code = prp_enum_mbus_code,
 	.enum_frame_size = prp_enum_frame_size,
+	.enum_frame_interval = prp_enum_frame_interval,
 	.get_fmt = prp_get_fmt,
 	.set_fmt = prp_set_fmt,
 };
