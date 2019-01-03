@@ -253,7 +253,6 @@ static int rvin_group_init(struct rvin_group *group, struct rvin_dev *vin)
 	struct media_device *mdev = &group->mdev;
 	const struct of_device_id *match;
 	struct device_node *np;
-	int ret;
 
 	mutex_init(&group->lock);
 
@@ -266,7 +265,6 @@ static int rvin_group_init(struct rvin_group *group, struct rvin_dev *vin)
 	vin_dbg(vin, "found %u enabled VIN's in DT", group->count);
 
 	mdev->dev = vin->dev;
-	mdev->ops = &rvin_media_ops;
 
 	match = of_match_node(vin->dev->driver->of_match_table,
 			      vin->dev->of_node);
@@ -278,11 +276,7 @@ static int rvin_group_init(struct rvin_group *group, struct rvin_dev *vin)
 
 	media_device_init(mdev);
 
-	ret = media_device_register(&group->mdev);
-	if (ret)
-		rvin_group_cleanup(group);
-
-	return ret;
+	return 0;
 }
 
 static void rvin_group_release(struct kref *kref)
@@ -657,6 +651,8 @@ static int rvin_group_notify_complete(struct v4l2_async_notifier *notifier)
 		return ret;
 	}
 
+	vin->group->mdev.ops = &rvin_media_ops;
+
 	/* Register all video nodes for the group. */
 	for (i = 0; i < RCAR_VIN_NUM; i++) {
 		if (vin->group->vin[i] &&
@@ -705,8 +701,10 @@ static int rvin_group_notify_complete(struct v4l2_async_notifier *notifier)
 		}
 	}
 	mutex_unlock(&vin->group->lock);
+	if (ret)
+		return ret;
 
-	return ret;
+	return media_device_register(&vin->group->mdev);
 }
 
 static void rvin_group_notify_unbind(struct v4l2_async_notifier *notifier,
