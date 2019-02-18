@@ -35,6 +35,12 @@
 #include <video/imx-ipu-v3.h>
 #include "ipu-prv.h"
 
+/* IPU Register Fields */
+#define VDI_MAX_RATIO_SKIP_MASK			0x000f0000
+#define VDI_MAX_RATIO_SKIP_SHIFT		16
+#define VDI_SKIP_MASK_MASK			0xfff00000
+#define VDI_SKIP_SHIFT_SHIFT			20
+
 static inline u32 ipu_cm_read(struct ipu_soc *ipu, unsigned offset)
 {
 	return readl(ipu->cm_reg + offset);
@@ -266,6 +272,28 @@ int ipu_rot_mode_to_degrees(int *degrees, enum ipu_rotate_mode mode,
 	return 0;
 }
 EXPORT_SYMBOL_GPL(ipu_rot_mode_to_degrees);
+
+int ipu_set_skip_vdi(struct ipu_soc *ipu, u32 skip, u32 max_ratio)
+{
+	unsigned long flags;
+	u32 temp;
+
+	if (max_ratio > 15)
+		return -EINVAL;
+
+	spin_lock_irqsave(&ipu->lock, flags);
+
+	temp = ipu_cm_read(ipu, IPU_SKIP);
+	temp &= ~(VDI_MAX_RATIO_SKIP_MASK | VDI_SKIP_MASK_MASK);
+	temp |= (max_ratio << VDI_MAX_RATIO_SKIP_SHIFT) |
+		(skip << VDI_SKIP_SHIFT_SHIFT);
+	ipu_cm_write(ipu, temp, IPU_SKIP);
+
+	spin_unlock_irqrestore(&ipu->lock, flags);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(ipu_set_skip_vdi);
 
 struct ipuv3_channel *ipu_idmac_get(struct ipu_soc *ipu, unsigned num)
 {

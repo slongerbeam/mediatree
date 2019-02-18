@@ -9,6 +9,7 @@
  * (at your option) any later version.
  */
 #include <linux/delay.h>
+#include <linux/gcd.h>
 #include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
@@ -68,6 +69,18 @@ struct vdic_pipeline_ops {
 #define H_ALIGN    1 /* multiple of 2 lines */
 #define S_ALIGN    1 /* multiple of 2 */
 
+/*
+ * struct vdic_skip_desc - VDIC frame skipping descriptor
+ * @keep - number of frames kept per max_ratio frames
+ * @max_ratio - width of skip, written to MAX_RATIO bitfield
+ * @skip - skip pattern written to the SKIP bitfield
+ */
+struct vdic_skip_desc {
+	u8 keep;
+	u8 max_ratio;
+	u8 skip;
+};
+
 struct vdic_priv {
 	struct device        *dev;
 	struct ipu_soc       *ipu;
@@ -111,6 +124,7 @@ struct vdic_priv {
 	struct v4l2_mbus_framefmt format_mbus[VDIC_NUM_PADS];
 	const struct imx_media_pixfmt *cc[VDIC_NUM_PADS];
 	struct v4l2_fract frame_interval[VDIC_NUM_PADS];
+	const struct vdic_skip_desc *skip;
 
 	/* the video device at IDMAC input pad */
 	struct imx_media_video_dev *vdev;
@@ -394,6 +408,7 @@ static int vdic_start(struct vdic_priv *priv)
 		      infmt->width, infmt->height);
 	ipu_vdi_set_field_order(priv->vdi, V4L2_STD_UNKNOWN, infmt->field);
 	ipu_vdi_set_motion(priv->vdi, priv->motion);
+	ipu_set_skip_vdi(priv->ipu, priv->skip->skip, priv->skip->max_ratio - 1);
 
 	ret = priv->ops->setup(priv);
 	if (ret)
@@ -562,6 +577,63 @@ static int vdic_enum_mbus_code(struct v4l2_subdev *sd,
 		return -EINVAL;
 
 	return imx_media_enum_ipu_format(&code->code, code->index, CS_SEL_YUV);
+}
+
+static const struct vdic_skip_desc vdic_skip[12] = {
+	{ 1, 1, 0x00 }, /* Keep all frames */
+	{ 5, 6, 0x10 }, /* Skip every sixth frame */
+	{ 4, 5, 0x08 }, /* Skip every fifth frame */
+	{ 3, 4, 0x04 }, /* Skip every fourth frame */
+	{ 2, 3, 0x02 }, /* Skip every third frame */
+	{ 3, 5, 0x0a }, /* Skip frames 1 and 3 of every 5 */
+	{ 1, 2, 0x01 }, /* Skip every second frame */
+	{ 2, 5, 0x0b }, /* Keep frames 1 and 4 of every 5 */
+	{ 1, 3, 0x03 }, /* Keep one in three frames */
+	{ 1, 4, 0x07 }, /* Keep one in four frames */
+	{ 1, 5, 0x0f }, /* Keep one in five frames */
+	{ 1, 6, 0x1f }, /* Keep one in six frames */
+};
+
+static void vdic_apply_skip_interval(const struct vdic_skip_desc *skip,
+				     struct v4l2_fract *interval)
+{
+	unsigned int div;
+
+	interval->numerator *= skip->max_ratio;
+	interval->denominator *= skip->keep;
+
+	/* Reduce fraction to lowest terms */
+	div = gcd(interval->numerator, interval->denominator);
+	if (div > 1) {
+		interval->numerator /= div;
+		interval->denominator /= div;
+	}
+}
+
+static int vdic_enum_frame_interval(struct v4l2_subdev *sd,
+				    struct v4l2_subdev_pad_config *cfg,
+				    struct v4l2_subdev_frame_interval_enum *fie)
+{
+	struct vdic_priv *priv = v4l2_get_subdevdata(sd);
+	struct v4l2_fract *input_fi;
+	int ret = 0;
+
+	if (fie->pad >= VDIC_NUM_PADS ||
+	    fie->index >= (fie->pad != VDIC_SRC_PAD_DIRECT ?
+			   1 : ARRAY_SIZE(vdic_skip)))
+		return -EINVAL;
+
+	mutex_lock(&priv->lock);
+
+	input_fi = &priv->frame_interval[CSI_SINK_PAD];
+	fie->interval = *input_fi;
+
+	if (fie->pad == VDIC_SRC_PAD_DIRECT)
+		vdic_apply_skip_interval(&vdic_skip[fie->index],
+					 &fie->interval);
+
+	mutex_unlock(&priv->lock);
+	return ret;
 }
 
 static int vdic_get_fmt(struct v4l2_subdev *sd,
@@ -792,6 +864,48 @@ static int vdic_link_validate(struct v4l2_subdev *sd,
 	return ret;
 }
 
+/*
+ * Find the skip pattern to produce the output frame interval closest to the
+ * requested one, for the given input frame interval. Updates the output frame
+ * interval to the exact value.
+ */
+static const struct vdic_skip_desc *vdic_find_best_skip(struct v4l2_fract *in,
+							struct v4l2_fract *out)
+{
+	const struct vdic_skip_desc *skip = &vdic_skip[0], *best_skip = skip;
+	u32 min_err = UINT_MAX;
+	u64 want_us;
+	int i;
+
+	/* Default to 1:1 ratio */
+	if (out->numerator == 0 || out->denominator == 0 ||
+	    in->numerator == 0 || in->denominator == 0) {
+		*out = *in;
+		return best_skip;
+	}
+
+	want_us = div_u64((u64)USEC_PER_SEC * out->numerator, out->denominator);
+
+	/* Find the reduction closest to the requested time per frame */
+	for (i = 0; i < ARRAY_SIZE(vdic_skip); i++, skip++) {
+		u64 tmp, err;
+
+		tmp = div_u64((u64)USEC_PER_SEC * in->numerator *
+			      skip->max_ratio, in->denominator * skip->keep);
+
+		err = abs((s64)tmp - want_us);
+		if (err < min_err) {
+			min_err = err;
+			best_skip = skip;
+		}
+	}
+
+	*out = *in;
+	vdic_apply_skip_interval(best_skip, out);
+
+	return best_skip;
+}
+
 static int vdic_g_frame_interval(struct v4l2_subdev *sd,
 				struct v4l2_subdev_frame_interval *fi)
 {
@@ -832,17 +946,10 @@ static int vdic_s_frame_interval(struct v4l2_subdev *sd,
 		*output_fi = fi->interval;
 		if (priv->csi_direct)
 			output_fi->denominator *= 2;
+		priv->skip = &vdic_skip[0];
 		break;
 	case VDIC_SRC_PAD_DIRECT:
-		/*
-		 * frame rate at output pad is double input
-		 * rate when using direct CSI->VDIC pipeline.
-		 *
-		 * TODO: implement VDIC frame skipping
-		 */
-		fi->interval = *input_fi;
-		if (priv->csi_direct)
-			fi->interval.denominator *= 2;
+		priv->skip = vdic_find_best_skip(output_fi, &fi->interval);
 		break;
 	default:
 		ret = -EINVAL;
@@ -889,6 +996,9 @@ static int vdic_registered(struct v4l2_subdev *sd)
 			priv->frame_interval[i].denominator *= 2;
 	}
 
+	/* disable frame skipping */
+	priv->skip = &vdic_skip[0];
+
 	priv->active_input_pad = VDIC_SINK_PAD_DIRECT;
 
 	ret = vdic_init_controls(priv);
@@ -912,6 +1022,7 @@ static void vdic_unregistered(struct v4l2_subdev *sd)
 static const struct v4l2_subdev_pad_ops vdic_pad_ops = {
 	.init_cfg = imx_media_init_cfg,
 	.enum_mbus_code = vdic_enum_mbus_code,
+	.enum_frame_interval = vdic_enum_frame_interval,
 	.get_fmt = vdic_get_fmt,
 	.set_fmt = vdic_set_fmt,
 	.link_validate = vdic_link_validate,
