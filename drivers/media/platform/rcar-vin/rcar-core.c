@@ -20,6 +20,7 @@
 #include <linux/sys_soc.h>
 
 #include <media/v4l2-async.h>
+#include <media/v4l2-event.h>
 #include <media/v4l2-fwnode.h>
 #include <media/v4l2-mc.h>
 
@@ -241,8 +242,107 @@ static const struct media_device_ops rvin_media_ops = {
 static DEFINE_MUTEX(rvin_group_lock);
 static struct rvin_group *rvin_group_data;
 
+/* -----------------------------------------------------------------------------
+ * Group subdev event handling
+ */
+
+static void rvin_group_do_event(struct rvin_group *group,
+				struct media_graph *graph,
+				struct rvin_event *ev)
+{
+	int i;
+
+	media_graph_walk_start(graph, &ev->sd->entity);
+
+	mutex_lock(&group->lock);
+
+	for (i = 0; i < RCAR_VIN_NUM; i++) {
+		struct rvin_dev *vin = group->vin[i];
+		struct media_entity *entity;
+
+		if (!vin)
+			continue;
+
+		while ((entity = media_graph_walk_next(graph))) {
+			if (entity == &vin->vdev.entity)
+				v4l2_event_queue(&vin->vdev, &ev->ev);
+		}
+	}
+
+	mutex_unlock(&group->lock);
+}
+
+static void rvin_group_event_work(struct work_struct *work)
+{
+	struct rvin_group *group = container_of(work, struct rvin_group,
+						event_work);
+	struct media_device *mdev = &group->mdev;
+	struct rvin_event *ev, *tmp;
+	struct media_graph graph;
+	unsigned long flags;
+	int ret;
+
+	mutex_lock(&mdev->graph_mutex);
+
+	ret = media_graph_walk_init(&graph, mdev);
+	if (ret) {
+		mutex_unlock(&mdev->graph_mutex);
+		return;
+	}
+
+	spin_lock_irqsave(&group->event_lock, flags);
+	list_for_each_entry_safe(ev, tmp, &group->event_list, list) {
+		list_del(&ev->list);
+
+		spin_unlock_irqrestore(&group->event_lock, flags);
+
+		rvin_group_do_event(group, &graph, ev);
+
+		devm_kfree(mdev->dev, ev);
+
+		spin_lock_irqsave(&group->event_lock, flags);
+	}
+
+	spin_unlock_irqrestore(&group->event_lock, flags);
+
+	mutex_unlock(&mdev->graph_mutex);
+
+	media_graph_walk_cleanup(&graph);
+}
+
+static void rvin_group_notify(struct v4l2_subdev *sd,
+			      unsigned int notification, void *arg)
+{
+	struct rvin_dev *vin = container_of(sd->v4l2_dev, struct rvin_dev,
+					    v4l2_dev);
+	struct rvin_group *group = vin->group;
+	struct media_device *mdev = &group->mdev;
+	struct v4l2_event *ev = arg;
+	struct rvin_event *rvin_ev;
+	unsigned long flags;
+
+	if (notification != V4L2_DEVICE_NOTIFY_EVENT)
+		return;
+
+	rvin_ev = devm_kzalloc(mdev->dev, sizeof(*rvin_ev), GFP_ATOMIC);
+	if (!rvin_ev)
+		return;
+
+	rvin_ev->sd = sd;
+	rvin_ev->notification = notification;
+	rvin_ev->ev = *ev;
+
+	spin_lock_irqsave(&group->event_lock, flags);
+
+	list_add_tail(&rvin_ev->list, &group->event_list);
+	schedule_work(&group->event_work);
+
+	spin_unlock_irqrestore(&group->event_lock, flags);
+}
+
 static void rvin_group_cleanup(struct rvin_group *group)
 {
+	cancel_work_sync(&group->event_work);
 	media_device_unregister(&group->mdev);
 	media_device_cleanup(&group->mdev);
 	mutex_destroy(&group->lock);
@@ -255,6 +355,10 @@ static int rvin_group_init(struct rvin_group *group, struct rvin_dev *vin)
 	struct device_node *np;
 
 	mutex_init(&group->lock);
+
+	spin_lock_init(&group->event_lock);
+	INIT_LIST_HEAD(&group->event_list);
+	INIT_WORK(&group->event_work, rvin_group_event_work);
 
 	/* Count number of VINs in the system */
 	group->count = 0;
@@ -657,6 +761,8 @@ static int rvin_group_notify_complete(struct v4l2_async_notifier *notifier)
 	for (i = 0; i < RCAR_VIN_NUM; i++) {
 		if (vin->group->vin[i] &&
 		    !video_is_registered(&vin->group->vin[i]->vdev)) {
+			vin->group->vin[i]->v4l2_dev.notify =
+				rvin_group_notify;
 			ret = rvin_v4l2_register(vin->group->vin[i]);
 			if (ret)
 				return ret;

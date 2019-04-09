@@ -993,8 +993,6 @@ int rvin_v4l2_register(struct rvin_dev *vin)
 	struct video_device *vdev = &vin->vdev;
 	int ret;
 
-	vin->v4l2_dev.notify = rvin_notify;
-
 	/* video node */
 	vdev->v4l2_dev = &vin->v4l2_dev;
 	vdev->queue = &vin->queue;
@@ -1015,6 +1013,7 @@ int rvin_v4l2_register(struct rvin_dev *vin)
 		vdev->fops = &rvin_mc_fops;
 		vdev->ioctl_ops = &rvin_mc_ioctl_ops;
 	} else {
+		vin->v4l2_dev.notify = rvin_notify;
 		vdev->fops = &rvin_fops;
 		vdev->ioctl_ops = &rvin_ioctl_ops;
 		rvin_reset_format(vin);

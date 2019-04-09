@@ -239,6 +239,13 @@ vin_to_source(struct rvin_dev *vin)
 #define vin_warn(d, fmt, arg...)	dev_warn(d->dev, fmt, ##arg)
 #define vin_err(d, fmt, arg...)		dev_err(d->dev, fmt, ##arg)
 
+struct rvin_event {
+	struct v4l2_subdev *sd;
+	unsigned int notification;
+	struct v4l2_event ev;
+	struct list_head list;
+};
+
 /**
  * struct rvin_group - VIN CSI2 group information
  * @refcount:		number of VIN instances using the group
@@ -266,6 +273,10 @@ struct rvin_group {
 		struct fwnode_handle *fwnode;
 		struct v4l2_subdev *subdev;
 	} csi[RVIN_CSI_MAX];
+
+	spinlock_t event_lock;
+	struct list_head event_list;
+	struct work_struct event_work;
 };
 
 int rvin_dma_register(struct rvin_dev *vin, int irq);
