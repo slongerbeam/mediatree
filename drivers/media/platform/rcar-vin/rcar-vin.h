@@ -217,7 +217,21 @@ struct rvin_dev {
 	v4l2_std_id std;
 };
 
-#define vin_to_source(vin)		((vin)->parallel->subdev)
+static inline struct v4l2_subdev *
+vin_to_source(struct rvin_dev *vin)
+{
+	if (vin->info->use_mc) {
+		struct media_pad *pad;
+
+		pad = media_entity_remote_pad(&vin->pad);
+		if (!pad)
+			return NULL;
+
+		return media_entity_to_v4l2_subdev(pad->entity);
+	}
+
+	return vin->parallel->subdev;
+}
 
 /* Debug */
 #define vin_dbg(d, fmt, arg...)		dev_dbg(d->dev, fmt, ##arg)
