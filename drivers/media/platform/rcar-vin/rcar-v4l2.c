@@ -152,20 +152,21 @@ static int rvin_reset_format(struct rvin_dev *vin)
 
 	rvin_format_align(vin, &vin->format);
 
-	vin->source.top = 0;
-	vin->source.left = 0;
-	vin->source.width = vin->format.width;
-	vin->source.height = vin->format.height;
+	vin->crop_bounds.top = 0;
+	vin->crop_bounds.left = 0;
+	vin->crop_bounds.width = vin->format.width;
+	vin->crop_bounds.height = vin->format.height;
 
-	vin->crop = vin->source;
-	vin->compose = vin->source;
+	vin->crop = vin->crop_bounds;
+	vin->compose = vin->crop_bounds;
 
 	return 0;
 }
 
 static int rvin_try_format(struct rvin_dev *vin, u32 which,
 			   struct v4l2_pix_format *pix,
-			   struct v4l2_rect *crop, struct v4l2_rect *compose)
+			   struct v4l2_rect *crop_bounds,
+			   struct v4l2_rect *compose)
 {
 	struct v4l2_subdev *sd = vin_to_source(vin);
 	struct v4l2_subdev_pad_config *pad_cfg;
@@ -199,18 +200,19 @@ static int rvin_try_format(struct rvin_dev *vin, u32 which,
 
 	v4l2_fill_pix_format(pix, &format.format);
 
-	if (crop) {
-		crop->top = 0;
-		crop->left = 0;
-		crop->width = pix->width;
-		crop->height = pix->height;
+	if (crop_bounds) {
+		crop_bounds->top = 0;
+		crop_bounds->left = 0;
+		crop_bounds->width = pix->width;
+		crop_bounds->height = pix->height;
 
 		/*
 		 * If source is ALTERNATE the driver will use the VIN hardware
-		 * to INTERLACE it. The crop height then needs to be doubled.
+		 * to INTERLACE it. The crop bounds height then needs to be
+		 * doubled.
 		 */
 		if (pix->field == V4L2_FIELD_ALTERNATE)
-			crop->height *= 2;
+			crop_bounds->height *= 2;
 	}
 
 	if (field != V4L2_FIELD_ANY)
@@ -258,21 +260,21 @@ static int rvin_s_fmt_vid_cap(struct file *file, void *priv,
 			      struct v4l2_format *f)
 {
 	struct rvin_dev *vin = video_drvdata(file);
-	struct v4l2_rect crop, compose;
+	struct v4l2_rect crop_bounds, compose;
 	int ret;
 
 	if (vb2_is_busy(&vin->queue))
 		return -EBUSY;
 
 	ret = rvin_try_format(vin, V4L2_SUBDEV_FORMAT_ACTIVE, &f->fmt.pix,
-			      &crop, &compose);
+			      &crop_bounds, &compose);
 	if (ret)
 		return ret;
 
 	vin->format = f->fmt.pix;
-	vin->crop = crop;
+	vin->crop_bounds = crop_bounds;
+	vin->crop = crop_bounds;
 	vin->compose = compose;
-	vin->source = crop;
 
 	return 0;
 }
@@ -310,8 +312,8 @@ static int rvin_g_selection(struct file *file, void *fh,
 	case V4L2_SEL_TGT_CROP_BOUNDS:
 	case V4L2_SEL_TGT_CROP_DEFAULT:
 		s->r.left = s->r.top = 0;
-		s->r.width = vin->source.width;
-		s->r.height = vin->source.height;
+		s->r.width = vin->crop_bounds.width;
+		s->r.height = vin->crop_bounds.height;
 		break;
 	case V4L2_SEL_TGT_CROP:
 		s->r = vin->crop;
@@ -353,21 +355,24 @@ static int rvin_s_selection(struct file *file, void *fh,
 	case V4L2_SEL_TGT_CROP:
 		/* Can't crop outside of source input */
 		max_rect.top = max_rect.left = 0;
-		max_rect.width = vin->source.width;
-		max_rect.height = vin->source.height;
+		max_rect.width = vin->crop_bounds.width;
+		max_rect.height = vin->crop_bounds.height;
 		v4l2_rect_map_inside(&r, &max_rect);
 
-		v4l_bound_align_image(&r.width, 6, vin->source.width, 0,
-				      &r.height, 2, vin->source.height, 0, 0);
+		v4l_bound_align_image(&r.width, 6, vin->crop_bounds.width, 0,
+				      &r.height, 2, vin->crop_bounds.height, 0,
+				      0);
 
-		r.top  = clamp_t(s32, r.top, 0, vin->source.height - r.height);
-		r.left = clamp_t(s32, r.left, 0, vin->source.width - r.width);
+		r.top  = clamp_t(s32, r.top, 0,
+				 vin->crop_bounds.height - r.height);
+		r.left = clamp_t(s32, r.left, 0,
+				 vin->crop_bounds.width - r.width);
 
 		vin->crop = s->r = r;
 
 		vin_dbg(vin, "Cropped %dx%d@%d:%d of %dx%d\n",
 			r.width, r.height, r.left, r.top,
-			vin->source.width, vin->source.height);
+			vin->crop_bounds.width, vin->crop_bounds.height);
 		break;
 	case V4L2_SEL_TGT_COMPOSE:
 		/* Make sure compose rect fits inside output format */
