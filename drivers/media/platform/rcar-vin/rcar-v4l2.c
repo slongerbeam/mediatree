@@ -136,19 +136,50 @@ static void rvin_format_align(struct rvin_dev *vin, struct v4l2_pix_format *pix)
  * V4L2
  */
 
-static int rvin_reset_format(struct rvin_dev *vin)
+static int rvin_get_sd_format(struct rvin_dev *vin,
+			      struct v4l2_mbus_framefmt *sd_format)
 {
 	struct v4l2_subdev_format fmt = {
 		.which = V4L2_SUBDEV_FORMAT_ACTIVE,
-		.pad = vin->parallel->source_pad,
 	};
+	struct v4l2_subdev *sd;
 	int ret;
 
-	ret = v4l2_subdev_call(vin_to_source(vin), pad, get_fmt, NULL, &fmt);
+	sd = vin_to_source(vin);
+	if (!sd)
+		return -EPIPE;
+
+	if (vin->info->use_mc) {
+		struct media_pad *pad;
+
+		pad = media_entity_remote_pad(&vin->pad);
+		if (!pad)
+			return -EPIPE;
+
+		fmt.pad = pad->index;
+	} else {
+		fmt.pad = vin->parallel->source_pad;
+	}
+
+	ret = v4l2_subdev_call(sd, pad, get_fmt, NULL, &fmt);
 	if (ret)
 		return ret;
 
-	v4l2_fill_pix_format(&vin->format, &fmt.format);
+	*sd_format = fmt.format;
+
+	return 0;
+}
+
+static int rvin_reset_format(struct rvin_dev *vin)
+{
+	struct v4l2_mbus_framefmt sd_format;
+	int ret;
+
+	ret = rvin_get_sd_format(vin, &sd_format);
+	if (ret)
+		return ret;
+
+	v4l2_fill_pix_format(&vin->format, &sd_format);
 
 	rvin_format_align(vin, &vin->format);
 
