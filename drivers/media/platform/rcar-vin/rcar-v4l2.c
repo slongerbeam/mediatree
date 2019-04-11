@@ -87,22 +87,18 @@ static u32 rvin_format_sizeimage(struct v4l2_pix_format *pix)
 	return pix->bytesperline * pix->height;
 }
 
-static void rvin_format_align(struct rvin_dev *vin, struct v4l2_pix_format *pix)
+static void rvin_try_field(struct rvin_dev *vin,
+			   struct v4l2_pix_format *pix,
+			   const struct v4l2_mbus_framefmt *sd_format)
 {
-	u32 walign;
-
-	if (!rvin_format_from_pixel(pix->pixelformat) ||
-	    (vin->info->model == RCAR_M1 &&
-	     pix->pixelformat == V4L2_PIX_FMT_XBGR32))
-		pix->pixelformat = RVIN_DEFAULT_FORMAT;
-
-	switch (pix->field) {
+	switch (sd_format->field) {
 	case V4L2_FIELD_TOP:
 	case V4L2_FIELD_BOTTOM:
 	case V4L2_FIELD_NONE:
 	case V4L2_FIELD_INTERLACED_TB:
 	case V4L2_FIELD_INTERLACED_BT:
 	case V4L2_FIELD_INTERLACED:
+		pix->field = sd_format->field;
 		break;
 	case V4L2_FIELD_ALTERNATE:
 		/*
@@ -111,12 +107,21 @@ static void rvin_format_align(struct rvin_dev *vin, struct v4l2_pix_format *pix)
 		 * the VIN hardware to combine the two fields.
 		 */
 		pix->field = V4L2_FIELD_INTERLACED;
-		pix->height *= 2;
 		break;
 	default:
 		pix->field = RVIN_DEFAULT_FIELD;
 		break;
 	}
+}
+
+static void rvin_format_align(struct rvin_dev *vin, struct v4l2_pix_format *pix)
+{
+	u32 walign;
+
+	if (!rvin_format_from_pixel(pix->pixelformat) ||
+	    (vin->info->model == RCAR_M1 &&
+	     pix->pixelformat == V4L2_PIX_FMT_XBGR32))
+		pix->pixelformat = RVIN_DEFAULT_FORMAT;
 
 	/* HW limit width to a multiple of 32 (2^5) for NV16 else 2 (2^1) */
 	walign = vin->format.pixelformat == V4L2_PIX_FMT_NV16 ? 5 : 1;
@@ -170,6 +175,39 @@ static int rvin_get_sd_format(struct rvin_dev *vin,
 	return 0;
 }
 
+static void rvin_fill_crop_bounds(struct v4l2_rect *crop_bounds,
+				  const struct v4l2_pix_format *pix,
+				  const struct v4l2_mbus_framefmt *sd_format)
+{
+	crop_bounds->top = 0;
+	crop_bounds->left = 0;
+	crop_bounds->width = sd_format->width;
+	crop_bounds->height = sd_format->height;
+	if (sd_format->field == V4L2_FIELD_ALTERNATE &&
+	    V4L2_FIELD_IS_INTERLACED(pix->field))
+		crop_bounds->height *= 2;
+}
+
+static void __rvin_reset_format(struct rvin_dev *vin,
+				const struct v4l2_mbus_framefmt *sd_format)
+{
+	v4l2_fill_pix_format(&vin->format, sd_format);
+
+	rvin_try_field(vin, &vin->format, sd_format);
+
+	rvin_format_align(vin, &vin->format);
+
+	/* update source rectangle (crop bounds) */
+	rvin_fill_crop_bounds(&vin->crop_bounds, &vin->format, sd_format);
+
+	/* reset user format window to new crop bounds */
+	vin->format.width = vin->crop_bounds.width;
+	vin->format.height = vin->crop_bounds.height;
+
+	vin->crop = vin->crop_bounds;
+	vin->compose = vin->crop_bounds;
+}
+
 static int rvin_reset_format(struct rvin_dev *vin)
 {
 	struct v4l2_mbus_framefmt sd_format;
@@ -179,17 +217,7 @@ static int rvin_reset_format(struct rvin_dev *vin)
 	if (ret)
 		return ret;
 
-	v4l2_fill_pix_format(&vin->format, &sd_format);
-
-	rvin_format_align(vin, &vin->format);
-
-	vin->crop_bounds.top = 0;
-	vin->crop_bounds.left = 0;
-	vin->crop_bounds.width = vin->format.width;
-	vin->crop_bounds.height = vin->format.height;
-
-	vin->crop = vin->crop_bounds;
-	vin->compose = vin->crop_bounds;
+	__rvin_reset_format(vin, &sd_format);
 
 	return 0;
 }
@@ -231,28 +259,18 @@ static int rvin_try_format(struct rvin_dev *vin, u32 which,
 
 	v4l2_fill_pix_format(pix, &format.format);
 
-	if (crop_bounds) {
-		crop_bounds->top = 0;
-		crop_bounds->left = 0;
-		crop_bounds->width = pix->width;
-		crop_bounds->height = pix->height;
-
-		/*
-		 * If source is ALTERNATE the driver will use the VIN hardware
-		 * to INTERLACE it. The crop bounds height then needs to be
-		 * doubled.
-		 */
-		if (pix->field == V4L2_FIELD_ALTERNATE)
-			crop_bounds->height *= 2;
-	}
-
 	if (field != V4L2_FIELD_ANY)
 		pix->field = field;
 
 	pix->width = width;
 	pix->height = height;
 
+	rvin_try_field(vin, pix, &format.format);
+
 	rvin_format_align(vin, pix);
+
+	if (crop_bounds)
+		rvin_fill_crop_bounds(crop_bounds, pix, &format.format);
 
 	if (compose) {
 		compose->top = 0;
@@ -694,9 +712,17 @@ static const struct v4l2_ioctl_ops rvin_ioctl_ops = {
  * V4L2 Media Controller
  */
 
-static void rvin_mc_try_format(struct rvin_dev *vin,
-			       struct v4l2_pix_format *pix)
+static int rvin_mc_try_format(struct rvin_dev *vin,
+			      struct v4l2_pix_format *pix,
+			      struct v4l2_rect *crop_bounds)
 {
+	struct v4l2_mbus_framefmt sd_format;
+	int ret;
+
+	ret = rvin_get_sd_format(vin, &sd_format);
+	if (ret)
+		return ret;
+
 	/*
 	 * The V4L2 specification clearly documents the colorspace fields
 	 * as being set by drivers for capture devices. Using the values
@@ -709,7 +735,14 @@ static void rvin_mc_try_format(struct rvin_dev *vin,
 	pix->quantization = V4L2_MAP_QUANTIZATION_DEFAULT(true, pix->colorspace,
 							  pix->ycbcr_enc);
 
+	rvin_try_field(vin, pix, &sd_format);
+
 	rvin_format_align(vin, pix);
+
+	if (crop_bounds)
+		rvin_fill_crop_bounds(crop_bounds, pix, &sd_format);
+
+	return 0;
 }
 
 static int rvin_mc_try_fmt_vid_cap(struct file *file, void *priv,
@@ -717,28 +750,27 @@ static int rvin_mc_try_fmt_vid_cap(struct file *file, void *priv,
 {
 	struct rvin_dev *vin = video_drvdata(file);
 
-	rvin_mc_try_format(vin, &f->fmt.pix);
-
-	return 0;
+	return rvin_mc_try_format(vin, &f->fmt.pix, NULL);
 }
 
 static int rvin_mc_s_fmt_vid_cap(struct file *file, void *priv,
 				 struct v4l2_format *f)
 {
 	struct rvin_dev *vin = video_drvdata(file);
+	int ret;
 
 	if (vb2_is_busy(&vin->queue))
 		return -EBUSY;
 
-	rvin_mc_try_format(vin, &f->fmt.pix);
+	ret = rvin_mc_try_format(vin, &f->fmt.pix, &vin->crop_bounds);
+	if (ret)
+		return ret;
 
 	vin->format = f->fmt.pix;
 
-	vin->crop.top = 0;
-	vin->crop.left = 0;
-	vin->crop.width = vin->format.width;
-	vin->crop.height = vin->format.height;
-	vin->compose = vin->crop;
+	/* reset crop and compose to crop bounds (source rectangle) */
+	vin->crop = vin->crop_bounds;
+	vin->compose = vin->crop_bounds;
 
 	return 0;
 }
@@ -1022,6 +1054,7 @@ static void rvin_notify(struct v4l2_subdev *sd,
 int rvin_v4l2_register(struct rvin_dev *vin)
 {
 	struct video_device *vdev = &vin->vdev;
+	struct v4l2_mbus_framefmt sd_format;
 	int ret;
 
 	/* video node */
@@ -1033,24 +1066,27 @@ int rvin_v4l2_register(struct rvin_dev *vin)
 	vdev->device_caps = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_STREAMING |
 		V4L2_CAP_READWRITE;
 
-	/* Set a default format */
-	vin->format.pixelformat	= RVIN_DEFAULT_FORMAT;
-	vin->format.width = RVIN_DEFAULT_WIDTH;
-	vin->format.height = RVIN_DEFAULT_HEIGHT;
-	vin->format.field = RVIN_DEFAULT_FIELD;
-	vin->format.colorspace = RVIN_DEFAULT_COLORSPACE;
-
 	if (vin->info->use_mc) {
 		vdev->fops = &rvin_mc_fops;
 		vdev->ioctl_ops = &rvin_mc_ioctl_ops;
+
+		/* Set a default format */
+		vin->format.pixelformat = RVIN_DEFAULT_FORMAT;
+		sd_format.width = RVIN_DEFAULT_WIDTH;
+		sd_format.height = RVIN_DEFAULT_HEIGHT;
+		sd_format.field = RVIN_DEFAULT_FIELD;
+		sd_format.colorspace = RVIN_DEFAULT_COLORSPACE;
 	} else {
 		vin->v4l2_dev.notify = rvin_notify;
 		vdev->fops = &rvin_fops;
 		vdev->ioctl_ops = &rvin_ioctl_ops;
-		rvin_reset_format(vin);
+
+		ret = rvin_get_sd_format(vin, &sd_format);
+		if (ret)
+			return ret;
 	}
 
-	rvin_format_align(vin, &vin->format);
+	__rvin_reset_format(vin, &sd_format);
 
 	ret = video_register_device(&vin->vdev, VFL_TYPE_GRABBER, -1);
 	if (ret) {
