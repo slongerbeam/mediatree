@@ -101,12 +101,6 @@ struct imx_media_buffer {
 struct imx_media_video_dev {
 	struct video_device *vfd;
 
-	/* the user format */
-	struct v4l2_format fmt;
-	/* the compose rectangle */
-	struct v4l2_rect compose;
-	const struct imx_media_pixfmt *cc;
-
 	/* links this vdev to master list */
 	struct list_head list;
 };
