@@ -200,43 +200,76 @@ out:
 	return ret;
 }
 
-static void prp_vb2_buf_done(struct prp_priv *priv, struct ipuv3_channel *ch)
+static void prp_prepare_buffers(struct prp_priv *priv,
+				struct ipuv3_channel *ch, u32 buf_num)
 {
 	struct imx_media_video_dev *vdev = priv->vdev_cap;
-	struct vb2_v4l2_buffer *done, *next;
+	struct imx_ic_priv *ic_priv = priv->ic_priv;
+	struct vb2_v4l2_buffer *next;
 	dma_addr_t phys;
-
-	done = priv->active_vb2_buf[priv->ipu_buf_num];
-	if (done) {
-		enum vb2_buffer_state status = priv->nfb4eof ?
-			VB2_BUF_STATE_ERROR : VB2_BUF_STATE_DONE;
-
-		done->sequence = priv->frame_sequence;
-		vdev->ops->buf_done(vdev, NULL, V4L2_BUF_TYPE_VIDEO_CAPTURE,
-				    done, status);
-	}
-
-	priv->frame_sequence++;
-	priv->nfb4eof = false;
 
 	/* remove next queued buffer */
 	next = vdev->ops->remove_next_buf(vdev, NULL,
 					  V4L2_BUF_TYPE_VIDEO_CAPTURE);
 	if (next) {
 		phys = vb2_dma_contig_plane_dma_addr(&next->vb2_buf, 0);
-		priv->active_vb2_buf[priv->ipu_buf_num] = next;
+		priv->active_vb2_buf[buf_num] = next;
 	} else {
 		phys = priv->underrun_buf.phys;
-		priv->active_vb2_buf[priv->ipu_buf_num] = NULL;
+		priv->active_vb2_buf[buf_num] = NULL;
 	}
 
-	if (ipu_idmac_buffer_is_ready(ch, priv->ipu_buf_num))
-		ipu_idmac_clear_buffer(ch, priv->ipu_buf_num);
+	dev_dbg(ic_priv->ipu_dev, "%s: dstbuf %p\n", __func__, next);
+
+	if (ipu_idmac_buffer_is_ready(ch, buf_num))
+		ipu_idmac_clear_buffer(ch, buf_num);
 
 	if (priv->interweave_swap && ch == priv->out_ch)
 		phys += priv->vdev_fmt.fmt.pix.bytesperline;
 
-	ipu_cpmem_set_buffer(ch, priv->ipu_buf_num, phys);
+	/* set and select IPU buf */
+	ipu_cpmem_set_buffer(ch, buf_num, phys);
+	ipu_idmac_select_buffer(ch, buf_num);
+}
+
+static void prp_unprepare_buffers(struct prp_priv *priv,
+				  enum vb2_buffer_state return_status)
+{
+	struct imx_media_video_dev *vdev = priv->vdev_cap;
+	struct vb2_v4l2_buffer *buf;
+	int i;
+
+	/* return any remaining active frames with return_status */
+	for (i = 0; i < 2; i++) {
+		buf = priv->active_vb2_buf[i];
+		if (!buf)
+			continue;
+
+		vdev->ops->buf_done(vdev, NULL, V4L2_BUF_TYPE_VIDEO_CAPTURE,
+				    buf, return_status);
+	}
+}
+
+static void prp_buffer_done(struct prp_priv *priv, struct ipuv3_channel *ch)
+{
+	struct imx_media_video_dev *vdev = priv->vdev_cap;
+	struct vb2_v4l2_buffer *done;
+
+	done = priv->active_vb2_buf[priv->ipu_buf_num];
+
+	priv->frame_sequence++;
+	priv->nfb4eof = false;
+	priv->active_vb2_buf[priv->ipu_buf_num] = NULL;
+
+	if (done) {
+		enum vb2_buffer_state status = priv->nfb4eof ?
+			VB2_BUF_STATE_ERROR : VB2_BUF_STATE_DONE;
+
+		done->sequence = priv->frame_sequence;
+		vdev->ops->buf_done(vdev, NULL,
+				    V4L2_BUF_TYPE_VIDEO_CAPTURE,
+				    done, status);
+	}
 }
 
 static irqreturn_t prp_eof_interrupt(int irq, void *dev_id)
@@ -255,16 +288,18 @@ static irqreturn_t prp_eof_interrupt(int irq, void *dev_id)
 	channel = (ipu_rot_mode_is_irt(priv->rot_mode)) ?
 		priv->rot_out_ch : priv->out_ch;
 
-	prp_vb2_buf_done(priv, channel);
+	prp_buffer_done(priv, channel);
 
-	/* select new IPU buf */
-	ipu_idmac_select_buffer(channel, priv->ipu_buf_num);
-	/* toggle IPU double-buffer index */
-	priv->ipu_buf_num ^= 1;
+	if (priv->active_output_pad == PRPENCVF_SRC_PAD_CAPTURE) {
+		prp_prepare_buffers(priv, channel, priv->ipu_buf_num);
 
-	/* bump the EOF timeout timer */
-	mod_timer(&priv->eof_timeout_timer,
-		  jiffies + msecs_to_jiffies(IMX_MEDIA_EOF_TIMEOUT));
+		/* toggle IPU double-buffer index */
+		priv->ipu_buf_num ^= 1;
+
+		/* bump the EOF timeout timer */
+		mod_timer(&priv->eof_timeout_timer,
+			  jiffies + msecs_to_jiffies(IMX_MEDIA_EOF_TIMEOUT));
+	}
 
 unlock:
 	spin_unlock(&priv->irqlock);
@@ -304,47 +339,14 @@ static void prp_eof_timeout(struct timer_list *t)
 	struct imx_media_video_dev *vdev = priv->vdev_cap;
 	struct imx_ic_priv *ic_priv = priv->ic_priv;
 
+	spin_lock(&priv->irqlock);
+
 	v4l2_err(&ic_priv->sd, "EOF timeout\n");
 
 	/* signal a fatal error to capture device */
 	vdev->ops->device_error(vdev, NULL);
-}
 
-static void prp_setup_vb2_buf(struct prp_priv *priv, dma_addr_t *phys)
-{
-	struct imx_media_video_dev *vdev = priv->vdev_cap;
-	struct vb2_v4l2_buffer *buf;
-	int i;
-
-	for (i = 0; i < 2; i++) {
-		buf = vdev->ops->remove_next_buf(vdev, NULL,
-						 V4L2_BUF_TYPE_VIDEO_CAPTURE);
-		if (buf) {
-			priv->active_vb2_buf[i] = buf;
-			phys[i] = vb2_dma_contig_plane_dma_addr(
-				&buf->vb2_buf, 0);
-		} else {
-			priv->active_vb2_buf[i] = NULL;
-			phys[i] = priv->underrun_buf.phys;
-		}
-	}
-}
-
-static void prp_unsetup_vb2_buf(struct prp_priv *priv,
-				enum vb2_buffer_state return_status)
-{
-	struct imx_media_video_dev *vdev = priv->vdev_cap;
-	struct vb2_v4l2_buffer *buf;
-	int i;
-
-	/* return any remaining active frames with return_status */
-	for (i = 0; i < 2; i++) {
-		buf = priv->active_vb2_buf[i];
-		if (buf)
-			vdev->ops->buf_done(vdev, NULL,
-					    V4L2_BUF_TYPE_VIDEO_CAPTURE,
-					    buf, return_status);
-	}
+	spin_unlock(&priv->irqlock);
 }
 
 static int prp_setup_channel(struct prp_priv *priv,
@@ -444,7 +446,8 @@ static int prp_setup_channel(struct prp_priv *priv,
 
 	ipu_cpmem_set_axi_id(channel, 1);
 
-	ipu_idmac_set_double_buffer(channel, true);
+	ipu_idmac_set_double_buffer(channel,
+		    priv->active_output_pad == PRPENCVF_SRC_PAD_CAPTURE);
 
 	return 0;
 }
@@ -456,7 +459,6 @@ static int prp_setup_rotation(struct prp_priv *priv)
 	struct v4l2_mbus_framefmt *infmt;
 	struct v4l2_pix_format *outfmt;
 	struct ipu_ic_csc csc;
-	dma_addr_t phys[2];
 	int ret;
 
 	infmt = &priv->format_mbus[PRPENCVF_SINK_PAD];
@@ -517,42 +519,17 @@ static int prp_setup_rotation(struct prp_priv *priv)
 		goto free_rot1;
 	}
 
-	prp_setup_vb2_buf(priv, phys);
-
 	/* init the destination IC-PRP ROT-->MEM IDMAC channel */
 	ret = prp_setup_channel(priv, priv->rot_out_ch, IPU_ROTATE_NONE,
-				phys[0], phys[1],
-				false);
+				0, 0, false);
 	if (ret) {
 		v4l2_err(&ic_priv->sd,
 			 "prp_setup_channel(rot_out_ch) failed, %d\n", ret);
-		goto unsetup_vb2;
+		goto free_rot1;
 	}
-
-	/* now link IC-PRP-->MEM to MEM-->IC-PRP ROT */
-	ipu_idmac_link(priv->out_ch, priv->rot_in_ch);
-
-	/* enable the IC */
-	ipu_ic_enable(priv->ic);
-
-	/* set buffers ready */
-	ipu_idmac_select_buffer(priv->out_ch, 0);
-	ipu_idmac_select_buffer(priv->out_ch, 1);
-	ipu_idmac_select_buffer(priv->rot_out_ch, 0);
-	ipu_idmac_select_buffer(priv->rot_out_ch, 1);
-
-	/* enable the channels */
-	ipu_idmac_enable_channel(priv->out_ch);
-	ipu_idmac_enable_channel(priv->rot_in_ch);
-	ipu_idmac_enable_channel(priv->rot_out_ch);
-
-	/* and finally enable the IC PRP task */
-	ipu_ic_task_enable(priv->ic);
 
 	return 0;
 
-unsetup_vb2:
-	prp_unsetup_vb2_buf(priv, VB2_BUF_STATE_QUEUED);
 free_rot1:
 	imx_media_free_dma_buf(ic_priv->ipu_dev, &priv->rot_buf[1]);
 free_rot0:
@@ -563,16 +540,6 @@ free_rot0:
 static void prp_unsetup_rotation(struct prp_priv *priv)
 {
 	struct imx_ic_priv *ic_priv = priv->ic_priv;
-
-	ipu_ic_task_disable(priv->ic);
-
-	ipu_idmac_disable_channel(priv->out_ch);
-	ipu_idmac_disable_channel(priv->rot_in_ch);
-	ipu_idmac_disable_channel(priv->rot_out_ch);
-
-	ipu_idmac_unlink(priv->out_ch, priv->rot_in_ch);
-
-	ipu_ic_disable(priv->ic);
 
 	imx_media_free_dma_buf(ic_priv->ipu_dev, &priv->rot_buf[0]);
 	imx_media_free_dma_buf(ic_priv->ipu_dev, &priv->rot_buf[1]);
@@ -585,7 +552,6 @@ static int prp_setup_norotation(struct prp_priv *priv)
 	struct v4l2_mbus_framefmt *infmt;
 	struct v4l2_pix_format *outfmt;
 	struct ipu_ic_csc csc;
-	dma_addr_t phys[2];
 	int ret;
 
 	infmt = &priv->format_mbus[PRPENCVF_SINK_PAD];
@@ -612,59 +578,157 @@ static int prp_setup_norotation(struct prp_priv *priv)
 		return ret;
 	}
 
-	prp_setup_vb2_buf(priv, phys);
-
 	/* init the IC PRP-->MEM IDMAC channel */
 	ret = prp_setup_channel(priv, priv->out_ch, priv->rot_mode,
-				phys[0], phys[1], false);
+				0, 0, false);
 	if (ret) {
 		v4l2_err(&ic_priv->sd,
 			 "prp_setup_channel(out_ch) failed, %d\n", ret);
-		goto unsetup_vb2;
+		return ret;
 	}
 
 	ipu_cpmem_dump(priv->out_ch);
 	ipu_ic_dump(priv->ic);
 	ipu_dump(ic_priv->ipu);
 
+	return 0;
+}
+
+static void prp_unsetup_norotation(struct prp_priv *priv)
+{
+	/* nothing to do */
+}
+
+static int prp_setup(struct prp_priv *priv)
+{
+	if (ipu_rot_mode_is_irt(priv->rot_mode))
+		return prp_setup_rotation(priv);
+	return prp_setup_norotation(priv);
+}
+
+static void prp_unsetup(struct prp_priv *priv)
+{
+	if (ipu_rot_mode_is_irt(priv->rot_mode))
+		prp_unsetup_rotation(priv);
+	else
+		prp_unsetup_norotation(priv);
+}
+
+static void prp_start_rotation_pre_run(struct prp_priv *priv)
+{
+	/* link IC-PRP-->MEM to MEM-->IC-PRP ROT */
+	ipu_idmac_link(priv->out_ch, priv->rot_in_ch);
+
+	/* enable the IC */
 	ipu_ic_enable(priv->ic);
+	ipu_ic_task_enable(priv->ic);
+
+	prp_prepare_buffers(priv, priv->rot_out_ch, 0);
+	if (priv->active_output_pad == PRPENCVF_SRC_PAD_CAPTURE)
+		prp_prepare_buffers(priv, priv->rot_out_ch, 1);
 
 	/* set buffers ready */
 	ipu_idmac_select_buffer(priv->out_ch, 0);
 	ipu_idmac_select_buffer(priv->out_ch, 1);
-
-	/* enable the channels */
-	ipu_idmac_enable_channel(priv->out_ch);
-
-	/* enable the IC task */
-	ipu_ic_task_enable(priv->ic);
-
-	return 0;
-
-unsetup_vb2:
-	prp_unsetup_vb2_buf(priv, VB2_BUF_STATE_QUEUED);
-	return ret;
 }
 
-static void prp_unsetup_norotation(struct prp_priv *priv)
+static void prp_start_rotation_post_run(struct prp_priv *priv)
+{
+	/* enable the channels */
+	ipu_idmac_enable_channel(priv->out_ch);
+	ipu_idmac_enable_channel(priv->rot_in_ch);
+	ipu_idmac_enable_channel(priv->rot_out_ch);
+}
+
+static void prp_stop_rotation(struct prp_priv *priv)
+{
+	ipu_ic_task_disable(priv->ic);
+
+	ipu_idmac_disable_channel(priv->out_ch);
+	ipu_idmac_disable_channel(priv->rot_in_ch);
+	ipu_idmac_disable_channel(priv->rot_out_ch);
+
+	ipu_ic_disable(priv->ic);
+
+	ipu_idmac_unlink(priv->out_ch, priv->rot_in_ch);
+}
+
+static void prp_start_norotation_pre_run(struct prp_priv *priv)
+{
+	ipu_ic_enable(priv->ic);
+	ipu_ic_task_enable(priv->ic);
+
+	prp_prepare_buffers(priv, priv->out_ch, 0);
+	if (priv->active_output_pad == PRPENCVF_SRC_PAD_CAPTURE)
+		prp_prepare_buffers(priv, priv->out_ch, 1);
+}
+
+static void prp_start_norotation_post_run(struct prp_priv *priv)
+{
+	/* enable the channels */
+	ipu_idmac_enable_channel(priv->out_ch);
+}
+
+static void prp_stop_norotation(struct prp_priv *priv)
 {
 	ipu_ic_task_disable(priv->ic);
 	ipu_idmac_disable_channel(priv->out_ch);
 	ipu_ic_disable(priv->ic);
 }
 
-static void prp_unsetup(struct prp_priv *priv,
-			enum vb2_buffer_state state)
+static void prp_start_pre_run(struct prp_priv *priv)
 {
 	if (ipu_rot_mode_is_irt(priv->rot_mode))
-		prp_unsetup_rotation(priv);
+		prp_start_rotation_pre_run(priv);
 	else
-		prp_unsetup_norotation(priv);
-
-	prp_unsetup_vb2_buf(priv, state);
+		prp_start_norotation_pre_run(priv);
 }
 
-static int prp_start(struct prp_priv *priv)
+static void prp_start_post_run(struct prp_priv *priv)
+{
+	if (ipu_rot_mode_is_irt(priv->rot_mode))
+		prp_start_rotation_post_run(priv);
+	else
+		prp_start_norotation_post_run(priv);
+}
+
+static void prp_start(struct prp_priv *priv)
+{
+	prp_start_pre_run(priv);
+	prp_start_post_run(priv);
+}
+
+static void prp_stop(struct prp_priv *priv, enum vb2_buffer_state state)
+{
+	if (ipu_rot_mode_is_irt(priv->rot_mode))
+		prp_stop_rotation(priv);
+	else
+		prp_stop_norotation(priv);
+
+	prp_unprepare_buffers(priv, state);
+}
+
+static void prp_wait_last_eof(struct prp_priv *priv)
+{
+	struct imx_ic_priv *ic_priv = priv->ic_priv;
+	unsigned long flags;
+	int ret;
+
+	/* mark next EOF interrupt as the last before stream off */
+	spin_lock_irqsave(&priv->irqlock, flags);
+	priv->last_eof = true;
+	spin_unlock_irqrestore(&priv->irqlock, flags);
+
+	/*
+	 * and then wait for interrupt handler to mark completion.
+	 */
+	ret = wait_for_completion_timeout(&priv->last_eof_comp,
+				msecs_to_jiffies(IMX_MEDIA_EOF_TIMEOUT));
+	if (ret == 0)
+		v4l2_warn(&ic_priv->sd, "wait last EOF timeout\n");
+}
+
+static int prp_stream_start(struct prp_priv *priv)
 {
 	struct imx_ic_priv *ic_priv = priv->ic_priv;
 	struct imx_media_video_dev *vdev = priv->vdev_cap;
@@ -691,10 +755,7 @@ static int prp_start(struct prp_priv *priv)
 	priv->last_eof = false;
 	priv->nfb4eof = false;
 
-	if (ipu_rot_mode_is_irt(priv->rot_mode))
-		ret = prp_setup_rotation(priv);
-	else
-		ret = prp_setup_norotation(priv);
+	ret = prp_setup(priv);
 	if (ret)
 		goto out_free_underrun;
 
@@ -726,27 +787,35 @@ static int prp_start(struct prp_priv *priv)
 		goto out_free_nfb4eof_irq;
 	}
 
+	if (priv->active_output_pad == PRPENCVF_SRC_PAD_CAPTURE) {
+		prp_start(priv);
+		/* start the EOF timeout timer */
+		mod_timer(&priv->eof_timeout_timer,
+			  jiffies + msecs_to_jiffies(IMX_MEDIA_EOF_TIMEOUT));
+	}
+
 	/* start upstream */
 	ret = v4l2_subdev_call(priv->src_sd, video, s_stream, 1);
 	ret = (ret && ret != -ENOIOCTLCMD) ? ret : 0;
 	if (ret) {
 		v4l2_err(&ic_priv->sd,
 			 "upstream stream on failed: %d\n", ret);
-		goto out_free_eof_irq;
+		goto out_stop;
 	}
-
-	/* start the EOF timeout timer */
-	mod_timer(&priv->eof_timeout_timer,
-		  jiffies + msecs_to_jiffies(IMX_MEDIA_EOF_TIMEOUT));
 
 	return 0;
 
-out_free_eof_irq:
+out_stop:
+	if (priv->active_output_pad == PRPENCVF_SRC_PAD_CAPTURE) {
+		prp_stop(priv, VB2_BUF_STATE_QUEUED);
+		/* cancel the EOF timeout timer */
+		del_timer_sync(&priv->eof_timeout_timer);
+	}
 	devm_free_irq(ic_priv->ipu_dev, priv->eof_irq, priv);
 out_free_nfb4eof_irq:
 	devm_free_irq(ic_priv->ipu_dev, priv->nfb4eof_irq, priv);
 out_unsetup:
-	prp_unsetup(priv, VB2_BUF_STATE_QUEUED);
+	prp_unsetup(priv);
 out_free_underrun:
 	imx_media_free_dma_buf(ic_priv->ipu_dev, &priv->underrun_buf);
 out_put_ipu:
@@ -754,25 +823,13 @@ out_put_ipu:
 	return ret;
 }
 
-static void prp_stop(struct prp_priv *priv)
+static void prp_stream_stop(struct prp_priv *priv)
 {
 	struct imx_ic_priv *ic_priv = priv->ic_priv;
-	unsigned long flags;
 	int ret;
 
-	/* mark next EOF interrupt as the last before stream off */
-	spin_lock_irqsave(&priv->irqlock, flags);
-	priv->last_eof = true;
-	spin_unlock_irqrestore(&priv->irqlock, flags);
-
-	/*
-	 * and then wait for interrupt handler to mark completion.
-	 */
-	ret = wait_for_completion_timeout(
-		&priv->last_eof_comp,
-		msecs_to_jiffies(IMX_MEDIA_EOF_TIMEOUT));
-	if (ret == 0)
-		v4l2_warn(&ic_priv->sd, "wait last EOF timeout\n");
+	if (priv->active_output_pad == PRPENCVF_SRC_PAD_CAPTURE)
+		prp_wait_last_eof(priv);
 
 	/* stop upstream */
 	ret = v4l2_subdev_call(priv->src_sd, video, s_stream, 0);
@@ -780,15 +837,18 @@ static void prp_stop(struct prp_priv *priv)
 		v4l2_warn(&ic_priv->sd,
 			  "upstream stream off failed: %d\n", ret);
 
+	if (priv->active_output_pad == PRPENCVF_SRC_PAD_CAPTURE) {
+		prp_stop(priv, VB2_BUF_STATE_ERROR);
+		/* cancel the EOF timeout timer */
+		del_timer_sync(&priv->eof_timeout_timer);
+	}
+
 	devm_free_irq(ic_priv->ipu_dev, priv->eof_irq, priv);
 	devm_free_irq(ic_priv->ipu_dev, priv->nfb4eof_irq, priv);
 
-	prp_unsetup(priv, VB2_BUF_STATE_ERROR);
+	prp_unsetup(priv);
 
 	imx_media_free_dma_buf(ic_priv->ipu_dev, &priv->underrun_buf);
-
-	/* cancel the EOF timeout timer */
-	del_timer_sync(&priv->eof_timeout_timer);
 
 	prp_put_ipu_resources(priv);
 }
@@ -1208,9 +1268,9 @@ static int prp_s_stream(struct v4l2_subdev *sd, int enable)
 		enable ? "ON" : "OFF");
 
 	if (enable)
-		ret = prp_start(priv);
+		ret = prp_stream_start(priv);
 	else
-		prp_stop(priv);
+		prp_stream_stop(priv);
 	if (ret)
 		goto out;
 
