@@ -344,6 +344,24 @@ out:
 	return ret;
 }
 
+static int prp_device_run(struct v4l2_subdev *sd, void *ctx)
+{
+	struct imx_ic_priv *ic_priv = v4l2_get_subdevdata(sd);
+	struct prp_priv *priv = ic_priv->task_priv;
+
+	/* propagate upstream */
+	return v4l2_subdev_call(priv->src_sd, proc, device_run, ctx);
+}
+
+static int prp_job_done(struct v4l2_subdev *sd, void *ctx)
+{
+	struct imx_ic_priv *ic_priv = v4l2_get_subdevdata(sd);
+	struct prp_priv *priv = ic_priv->task_priv;
+
+	/* propagate upstream */
+	return v4l2_subdev_call(priv->src_sd, proc, job_done, ctx);
+}
+
 static int prp_s_stream(struct v4l2_subdev *sd, int enable)
 {
 	struct imx_ic_priv *ic_priv = v4l2_get_subdevdata(sd);
@@ -457,6 +475,11 @@ static const struct v4l2_subdev_video_ops prp_video_ops = {
 	.s_stream = prp_s_stream,
 };
 
+static const struct v4l2_subdev_proc_ops prp_proc_ops = {
+	.device_run = prp_device_run,
+	.job_done = prp_job_done,
+};
+
 static const struct media_entity_operations prp_entity_ops = {
 	.link_setup = prp_link_setup,
 	.link_validate = v4l2_subdev_link_validate,
@@ -464,6 +487,7 @@ static const struct media_entity_operations prp_entity_ops = {
 
 static const struct v4l2_subdev_ops prp_subdev_ops = {
 	.video = &prp_video_ops,
+	.proc = &prp_proc_ops,
 	.pad = &prp_pad_ops,
 };
 
