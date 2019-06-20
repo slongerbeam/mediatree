@@ -346,6 +346,15 @@ out:
 	return ret;
 }
 
+static long prp_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)
+{
+	struct imx_ic_priv *ic_priv = v4l2_get_subdevdata(sd);
+	struct prp_priv *priv = ic_priv->task_priv;
+
+	/* propagate upstream */
+	return v4l2_subdev_call(priv->src_sd, core, ioctl, cmd, arg);
+}
+
 static int prp_s_stream(struct v4l2_subdev *sd, int enable)
 {
 	struct imx_ic_priv *ic_priv = v4l2_get_subdevdata(sd);
@@ -460,12 +469,17 @@ static const struct v4l2_subdev_video_ops prp_video_ops = {
 	.s_stream = prp_s_stream,
 };
 
+static const struct v4l2_subdev_core_ops prp_core_ops = {
+	.ioctl = prp_ioctl,
+};
+
 static const struct media_entity_operations prp_entity_ops = {
 	.link_setup = prp_link_setup,
 	.link_validate = v4l2_subdev_link_validate,
 };
 
 static const struct v4l2_subdev_ops prp_subdev_ops = {
+	.core = &prp_core_ops,
 	.video = &prp_video_ops,
 	.pad = &prp_pad_ops,
 };
