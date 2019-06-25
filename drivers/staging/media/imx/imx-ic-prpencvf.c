@@ -27,13 +27,13 @@
 /*
  * Min/Max supported width and heights.
  *
- * We allow planar output, so we have to align width at the source pad
+ * We allow planar output, so we have to align width at the source pads
  * by 16 pixels to meet IDMAC alignment requirements for possible planar
  * output.
  *
  * TODO: move this into pad format negotiation, if capture device
  * has not requested a planar format, we should allow 8 pixel
- * alignment at the source pad.
+ * alignment at the source pads.
  */
 #define MIN_W_SINK  176
 #define MIN_H_SINK  144
@@ -52,14 +52,16 @@
 struct prp_priv {
 	struct imx_ic_priv *ic_priv;
 	struct media_pad pad[PRPENCVF_NUM_PADS];
-	/* the video device at output pad */
-	struct imx_media_video_dev *vdev;
+	/* the video device at capture output pad */
+	struct imx_media_video_dev *vdev_cap;
 	struct v4l2_format vdev_fmt;
 	struct v4l2_rect vdev_compose;
 	const struct imx_media_pixfmt *vdev_cc;
 
 	/* lock to protect all members below */
 	struct mutex lock;
+
+	int active_output_pad;
 
 	/* IPU units we require */
 	struct ipu_ic *ic;
@@ -200,7 +202,7 @@ out:
 
 static void prp_vb2_buf_done(struct prp_priv *priv, struct ipuv3_channel *ch)
 {
-	struct imx_media_video_dev *vdev = priv->vdev;
+	struct imx_media_video_dev *vdev = priv->vdev_cap;
 	struct vb2_v4l2_buffer *done, *next;
 	dma_addr_t phys;
 
@@ -299,7 +301,7 @@ static irqreturn_t prp_nfb4eof_interrupt(int irq, void *dev_id)
 static void prp_eof_timeout(struct timer_list *t)
 {
 	struct prp_priv *priv = from_timer(priv, t, eof_timeout_timer);
-	struct imx_media_video_dev *vdev = priv->vdev;
+	struct imx_media_video_dev *vdev = priv->vdev_cap;
 	struct imx_ic_priv *ic_priv = priv->ic_priv;
 
 	v4l2_err(&ic_priv->sd, "EOF timeout\n");
@@ -310,7 +312,7 @@ static void prp_eof_timeout(struct timer_list *t)
 
 static void prp_setup_vb2_buf(struct prp_priv *priv, dma_addr_t *phys)
 {
-	struct imx_media_video_dev *vdev = priv->vdev;
+	struct imx_media_video_dev *vdev = priv->vdev_cap;
 	struct vb2_v4l2_buffer *buf;
 	int i;
 
@@ -331,7 +333,7 @@ static void prp_setup_vb2_buf(struct prp_priv *priv, dma_addr_t *phys)
 static void prp_unsetup_vb2_buf(struct prp_priv *priv,
 				enum vb2_buffer_state return_status)
 {
-	struct imx_media_video_dev *vdev = priv->vdev;
+	struct imx_media_video_dev *vdev = priv->vdev_cap;
 	struct vb2_v4l2_buffer *buf;
 	int i;
 
@@ -358,7 +360,7 @@ static int prp_setup_channel(struct prp_priv *priv,
 	bool interweave;
 	int ret;
 
-	outfmt = &priv->format_mbus[PRPENCVF_SRC_PAD];
+	outfmt = &priv->format_mbus[priv->active_output_pad];
 	outcc = priv->vdev_cc;
 
 	ipu_cpmem_zero(channel);
@@ -665,7 +667,7 @@ static void prp_unsetup(struct prp_priv *priv,
 static int prp_start(struct prp_priv *priv)
 {
 	struct imx_ic_priv *ic_priv = priv->ic_priv;
-	struct imx_media_video_dev *vdev = priv->vdev;
+	struct imx_media_video_dev *vdev = priv->vdev_cap;
 	int ret;
 
 	ret = prp_get_ipu_resources(priv);
@@ -901,7 +903,9 @@ static void prp_try_fmt(struct prp_priv *priv,
 
 	infmt = __prp_get_fmt(priv, cfg, PRPENCVF_SINK_PAD, sdformat->which);
 
-	if (sdformat->pad == PRPENCVF_SRC_PAD) {
+	switch (sdformat->pad) {
+	case PRPENCVF_SRC_PAD_CAPTURE:
+	case PRPENCVF_SRC_PAD_MEM2MEM:
 		sdformat->format.field = infmt->field;
 
 		prp_bound_align_output(&sdformat->format, infmt,
@@ -910,7 +914,8 @@ static void prp_try_fmt(struct prp_priv *priv,
 		/* propagate colorimetry from sink */
 		sdformat->format.colorspace = infmt->colorspace;
 		sdformat->format.xfer_func = infmt->xfer_func;
-	} else {
+		break;
+	default:
 		v4l_bound_align_image(&sdformat->format.width,
 				      MIN_W_SINK, MAX_W_SINK, W_ALIGN_SINK,
 				      &sdformat->format.height,
@@ -919,6 +924,7 @@ static void prp_try_fmt(struct prp_priv *priv,
 
 		if (sdformat->format.field == V4L2_FIELD_ANY)
 			sdformat->format.field = V4L2_FIELD_NONE;
+		break;
 	}
 
 	imx_media_try_colorimetry(&sdformat->format, true);
@@ -948,22 +954,28 @@ static int prp_set_fmt(struct v4l2_subdev *sd,
 	fmt = __prp_get_fmt(priv, cfg, sdformat->pad, sdformat->which);
 	*fmt = sdformat->format;
 
-	/* propagate a default format to source pad */
+	/* propagate a default format to source pads */
 	if (sdformat->pad == PRPENCVF_SINK_PAD) {
-		const struct imx_media_pixfmt *outcc;
-		struct v4l2_mbus_framefmt *outfmt;
-		struct v4l2_subdev_format format;
+		int pad;
 
-		format.pad = PRPENCVF_SRC_PAD;
-		format.which = sdformat->which;
-		format.format = sdformat->format;
-		prp_try_fmt(priv, cfg, &format, &outcc);
+		for (pad = PRPENCVF_SINK_PAD + 1; pad < PRPENCVF_NUM_PADS;
+		     pad++) {
+			const struct imx_media_pixfmt *outcc;
+			struct v4l2_mbus_framefmt *outfmt;
+			struct v4l2_subdev_format format;
 
-		outfmt = __prp_get_fmt(priv, cfg, PRPENCVF_SRC_PAD,
-				       sdformat->which);
-		*outfmt = format.format;
-		if (sdformat->which == V4L2_SUBDEV_FORMAT_ACTIVE)
-			priv->cc[PRPENCVF_SRC_PAD] = outcc;
+			format.pad = pad;
+			format.which = sdformat->which;
+			format.format = sdformat->format;
+			prp_try_fmt(priv, cfg, &format, &outcc);
+
+			outfmt = __prp_get_fmt(priv, cfg, pad,
+					       sdformat->which);
+			*outfmt = format.format;
+
+			if (sdformat->which == V4L2_SUBDEV_FORMAT_ACTIVE)
+				priv->cc[pad] = outcc;
+		}
 	}
 
 	if (sdformat->which == V4L2_SUBDEV_FORMAT_ACTIVE)
@@ -1049,11 +1061,11 @@ static int prp_link_setup(struct media_entity *entity,
 		goto out;
 	}
 
-	/* this is the source pad */
+	/* this is a source pad */
 
-	/* the remote must be the device node */
-	if (!is_media_entity_v4l2_video_device(remote->entity)) {
-		ret = -EINVAL;
+	/* the source pad must be the capture pad for now */
+	if (local->index != PRPENCVF_SRC_PAD_CAPTURE) {
+		ret = -ENODEV;
 		goto out;
 	}
 
@@ -1068,6 +1080,8 @@ static int prp_link_setup(struct media_entity *entity,
 	}
 
 	priv->sink = remote->entity;
+	/* record which output pad is now active */
+	priv->active_output_pad = local->index;
 out:
 	mutex_unlock(&priv->lock);
 	return ret;
@@ -1117,7 +1131,7 @@ static int prp_s_ctrl(struct v4l2_ctrl *ctrl)
 			goto out;
 		}
 
-		outfmt = priv->format_mbus[PRPENCVF_SRC_PAD];
+		outfmt = priv->format_mbus[priv->active_output_pad];
 		infmt = priv->format_mbus[PRPENCVF_SINK_PAD];
 
 		if (prp_bound_align_output(&outfmt, &infmt, rot_mode)) {
@@ -1267,13 +1281,13 @@ static int prp_registered(struct v4l2_subdev *sd)
 	priv->frame_interval.numerator = 1;
 	priv->frame_interval.denominator = 30;
 
-	priv->vdev = imx_media_capture_device_init(ic_priv->ipu_dev,
+	priv->vdev_cap = imx_media_capture_device_init(ic_priv->ipu_dev,
 						   &ic_priv->sd,
-						   PRPENCVF_SRC_PAD);
-	if (IS_ERR(priv->vdev))
-		return PTR_ERR(priv->vdev);
+						   PRPENCVF_SRC_PAD_CAPTURE);
+	if (IS_ERR(priv->vdev_cap))
+		return PTR_ERR(priv->vdev_cap);
 
-	ret = imx_media_capture_device_register(priv->vdev);
+	ret = imx_media_capture_device_register(priv->vdev_cap);
 	if (ret)
 		goto remove_vdev;
 
@@ -1284,9 +1298,9 @@ static int prp_registered(struct v4l2_subdev *sd)
 	return 0;
 
 unreg_vdev:
-	imx_media_capture_device_unregister(priv->vdev);
+	imx_media_capture_device_unregister(priv->vdev_cap);
 remove_vdev:
-	imx_media_capture_device_remove(priv->vdev);
+	imx_media_capture_device_remove(priv->vdev_cap);
 	return ret;
 }
 
@@ -1294,8 +1308,8 @@ static void prp_unregistered(struct v4l2_subdev *sd)
 {
 	struct prp_priv *priv = sd_to_priv(sd);
 
-	imx_media_capture_device_unregister(priv->vdev);
-	imx_media_capture_device_remove(priv->vdev);
+	imx_media_capture_device_unregister(priv->vdev_cap);
+	imx_media_capture_device_remove(priv->vdev_cap);
 
 	v4l2_ctrl_handler_free(&priv->ctrl_hdlr);
 }
@@ -1340,6 +1354,7 @@ static int prp_init(struct imx_ic_priv *ic_priv)
 
 	ic_priv->task_priv = priv;
 	priv->ic_priv = ic_priv;
+	priv->active_output_pad = PRPENCVF_SRC_PAD_CAPTURE;
 
 	spin_lock_init(&priv->irqlock);
 	timer_setup(&priv->eof_timeout_timer, prp_eof_timeout, 0);
