@@ -356,6 +356,22 @@ static struct vdic_pipeline_ops indirect_ops = {
 	.disable = vdic_disable_indirect,
 };
 
+static u32 vdic_get_top_field_position(u32 field)
+{
+	switch (field) {
+	case V4L2_FIELD_INTERLACED_TB:
+	case V4L2_FIELD_SEQ_TB:
+		return IPU_VDI_FIELD_CURR; /* BTB order to VDIC */
+	case V4L2_FIELD_INTERLACED_BT:
+	case V4L2_FIELD_SEQ_BT:
+		return IPU_VDI_FIELD_PREV; /* TBT order to VDIC */
+	default:
+		break;
+	}
+
+	return IPU_VDI_FIELD_CURR; /* assume BTB order to VDIC */
+}
+
 static int vdic_start(struct vdic_priv *priv)
 {
 	struct v4l2_mbus_framefmt *infmt;
@@ -378,7 +394,8 @@ static int vdic_start(struct vdic_priv *priv)
 	 */
 	ipu_vdi_setup(priv->vdi, MEDIA_BUS_FMT_UYVY8_2X8,
 		      infmt->width, infmt->height);
-	ipu_vdi_set_field_order(priv->vdi, V4L2_STD_UNKNOWN, infmt->field);
+	ipu_vdi_set_field_order(priv->vdi,
+				vdic_get_top_field_position(infmt->field));
 	ipu_vdi_set_motion(priv->vdi, priv->motion);
 
 	ret = priv->ops->setup(priv);

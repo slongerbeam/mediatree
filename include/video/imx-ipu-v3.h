@@ -461,8 +461,23 @@ void ipu_ic_dump(struct ipu_ic *ic);
 /*
  * IPU Video De-Interlacer (vdi) functions
  */
+
 struct ipu_vdi;
-void ipu_vdi_set_field_order(struct ipu_vdi *vdi, v4l2_std_id std, u32 field);
+
+/*
+ * An enumeration of the three fields the VDIC works with to carry
+ * out motion compensated de-interlacing. PREV, CURR, NEXT are also
+ * known as F(n-1), F(n), and F(n+1) respectively, in the i.MX6
+ * reference manual.
+ */
+enum ipu_vdi_field {
+	IPU_VDI_FIELD_PREV = 0, /* F(n-1)  */
+	IPU_VDI_FIELD_CURR,     /* F(n) */
+	IPU_VDI_FIELD_NEXT,     /* F(n+1) */
+	IPU_VDI_NUM_FIELDS,
+};
+
+int ipu_vdi_set_field_order(struct ipu_vdi *vdi, enum ipu_vdi_field top_field);
 void ipu_vdi_set_motion(struct ipu_vdi *vdi, enum ipu_motion_sel motion_sel);
 void ipu_vdi_setup(struct ipu_vdi *vdi, u32 code, int xres, int yres);
 void ipu_vdi_unsetup(struct ipu_vdi *vdi);

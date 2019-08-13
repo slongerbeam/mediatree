@@ -53,38 +53,35 @@ static inline void ipu_vdi_write(struct ipu_vdi *vdi, u32 value,
 	writel(value, vdi->base + offset);
 }
 
-void ipu_vdi_set_field_order(struct ipu_vdi *vdi, v4l2_std_id std, u32 field)
+/*
+ * The VDI_C_TOP_FIELD bits tag which field out of the three
+ * fields F(n-1), F(n), F(n+1) received by the VDIC, is the
+ * TOP field:
+ *
+ * VDI_C_TOP_FIELD = 0: F(n-1) is TOP field (TBT)
+ * VDI_C_TOP_FIELD = 1: F(n) is TOP field (BTB)
+ */
+int ipu_vdi_set_field_order(struct ipu_vdi *vdi, enum ipu_vdi_field top_field)
 {
-	bool top_field_0 = false;
 	unsigned long flags;
 	u32 reg;
 
-	switch (field) {
-	case V4L2_FIELD_INTERLACED_TB:
-	case V4L2_FIELD_SEQ_TB:
-	case V4L2_FIELD_TOP:
-		top_field_0 = true;
-		break;
-	case V4L2_FIELD_INTERLACED_BT:
-	case V4L2_FIELD_SEQ_BT:
-	case V4L2_FIELD_BOTTOM:
-		top_field_0 = false;
-		break;
-	default:
-		top_field_0 = (std & V4L2_STD_525_60) ? true : false;
-		break;
-	}
+	if (top_field != IPU_VDI_FIELD_PREV &&
+	    top_field != IPU_VDI_FIELD_CURR)
+		return -EINVAL;
 
 	spin_lock_irqsave(&vdi->lock, flags);
 
 	reg = ipu_vdi_read(vdi, VDI_C);
-	if (top_field_0)
-		reg &= ~(VDI_C_TOP_FIELD_MAN_1 | VDI_C_TOP_FIELD_AUTO_1);
-	else
+	if (top_field == IPU_VDI_FIELD_CURR)
 		reg |= VDI_C_TOP_FIELD_MAN_1 | VDI_C_TOP_FIELD_AUTO_1;
+	else
+		reg &= ~(VDI_C_TOP_FIELD_MAN_1 | VDI_C_TOP_FIELD_AUTO_1);
 	ipu_vdi_write(vdi, reg, VDI_C);
 
 	spin_unlock_irqrestore(&vdi->lock, flags);
+
+	return 0;
 }
 EXPORT_SYMBOL_GPL(ipu_vdi_set_field_order);
 
