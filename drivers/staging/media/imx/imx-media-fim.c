@@ -7,6 +7,7 @@
 #include <linux/delay.h>
 #include <linux/irq.h>
 #include <linux/module.h>
+#include <linux/mxc_icap.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
@@ -187,7 +188,6 @@ out_update_ts:
 		send_fim_event(fim, error_avg);
 }
 
-#ifdef CONFIG_IMX_GPT_ICAP
 /*
  * Input Capture method of measuring frame intervals. Not subject
  * to interrupt latency.
@@ -221,19 +221,6 @@ static void fim_free_input_capture(struct imx_media_fim *fim)
 {
 	mxc_free_input_capture(fim->icap_channel, fim);
 }
-
-#else /* CONFIG_IMX_GPT_ICAP */
-
-static int fim_request_input_capture(struct imx_media_fim *fim)
-{
-	return 0;
-}
-
-static void fim_free_input_capture(struct imx_media_fim *fim)
-{
-}
-
-#endif /* CONFIG_IMX_GPT_ICAP */
 
 /*
  * In case we are monitoring the first frame interval after streamon
