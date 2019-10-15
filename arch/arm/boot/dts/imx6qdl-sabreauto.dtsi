@@ -251,6 +251,17 @@
 	pinctrl-0 = <&pinctrl_ipu1_csi0>;
 };
 
+/* input capture requires the input capture pin */
+&gpt {
+	pinctrl-names = "default";
+	pinctrl-0 = <&pinctrl_gpt_input_capture0>;
+};
+
+/* enabling input capture requires disabling SDHC1 */
+&usdhc1 {
+	status = "disabled";
+};
+
 &clks {
 	assigned-clocks = <&clks IMX6QDL_PLL4_BYPASS_SRC>,
 			  <&clks IMX6QDL_PLL4_BYPASS>,
