@@ -33,6 +33,18 @@ Required properties:
            an entry for each entry in clock-names.
 - clock-names : must include "ipg" entry first, then "per" entry.
 
+Optional properties:
+
+- #timer-capture-cells: For the i.MX GPT to support the Timer Capture
+    			function, the number of cells used for the
+			timer-capture specifier. Must be 1.
+- pinctrl-0: For the i.MX GPT to support the Timer Capture channel 0
+  	     function, the channel 0 capture pin must be listed here.
+- pinctrl-1: For the i.MX GPT to support the Timer Capture channel 1
+  	     function, the channel 1 capture pin must be listed here.
+- pinctrl-names: must be "default".
+
+
 Example:
 
 gpt1: timer@10003000 {
@@ -42,4 +54,26 @@ gpt1: timer@10003000 {
 	clocks = <&clks IMX27_CLK_GPT1_IPG_GATE>,
 		 <&clks IMX27_CLK_PER1_GATE>;
 	clock-names = "ipg", "per";
+};
+
+
+Example with timer capture channel 0 support:
+
+pinctrl_gpt_capture0: gptcapture0grp {
+	fsl,pins = <
+		MX6QDL_PAD_SD1_DAT0__GPT_CAPTURE1 0x1b0b0
+	>;
+};
+
+gpt: gpt@2098000 {
+	compatible = "fsl,imx6q-gpt", "fsl,imx31-gpt";
+	reg = <0x02098000 0x4000>;
+	interrupts = <0 55 IRQ_TYPE_LEVEL_HIGH>;
+	clocks = <&clks IMX6QDL_CLK_GPT_IPG>,
+		<&clks IMX6QDL_CLK_GPT_IPG_PER>,
+		<&clks IMX6QDL_CLK_GPT_3M>;
+	clock-names = "ipg", "per", "osc_per";
+	#timer-capture-cells = <1>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&pinctrl_gpt_capture0>;
 };
