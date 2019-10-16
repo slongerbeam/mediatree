@@ -258,7 +258,7 @@ captured images).
 
 From experiment it was found that during image rolling, the frame
 intervals (elapsed time between two EOF's) drop below the nominal
-value for the current standard, by about one frame time (60 usec),
+value for the current standard, by about one line time (60 usec),
 and remain at that value until rolling stops.
 
 While the reason for this observation isn't known (the IPU dummy
@@ -266,10 +266,10 @@ line mechanism should show an increase in the intervals by 1 line
 time every frame, not a fixed value), we can use it to detect the
 corrupt fields using a frame interval monitor. If the FIM detects a
 bad frame interval, the ipuX_csiY subdev will send the event
-V4L2_EVENT_IMX_FRAME_INTERVAL_ERROR. Userland can register with
-the FIM event notification on the ipuX_csiY subdev device node.
-Userland can issue a streaming restart when this event is received
-to correct the rolling/split image.
+V4L2_EVENT_IMX_FRAME_INTERVAL_ERROR (0x08000001). Userland can register
+with the FIM event notification on the ipuX_csiY subdev device node or
+the ipuX_csiY capture device node. Userland can issue a streaming
+restart when this event is received to correct the rolling/split image.
 
 The ipuX_csiY subdev includes custom controls to tweak some dials for
 FIM. If one of these controls is changed during streaming, the FIM will
@@ -318,12 +318,16 @@ channel to use. This must be 0 or 1.
 
 V4L2_CID_IMX_FIM_ICAP_EDGE configures which signal edge will trigger
 input capture events. By default the input capture method is disabled
-with a value of IRQ_TYPE_NONE. Set this control to IRQ_TYPE_EDGE_RISING,
-IRQ_TYPE_EDGE_FALLING, or IRQ_TYPE_EDGE_BOTH to enable input capture,
-triggered on the given signal edge(s).
+with a value of IRQ_TYPE_NONE (0). Set this control to
+IRQ_TYPE_EDGE_RISING (1), IRQ_TYPE_EDGE_FALLING (2), or
+IRQ_TYPE_EDGE_BOTH (3) to enable input capture, triggered on the given
+signal edge(s).
 
 When input capture is disabled, frame intervals will be measured via
 EOF interrupt.
+
+See Usage Notes below for the SabreAuto reference board for example
+usage of FIM.
 
 
 ipuX_vdic
@@ -573,6 +577,49 @@ supported YUV or RGB pixelformat on the capture device node.
 
 This platform accepts Composite Video analog inputs to the ADV7180 on
 Ain1 (connector J42).
+
+Usage of FIM on SabreAuto
+-------------------------
+
+If capturing on the "ipuX_csiY capture" interfaces (FIM isn't yet
+available on the "ipuX_ic_prpenc/vf capture" interfaces), the SabreAuto
+can make use of the FIM to detect bad frame intervals from the ADV7180.
+
+This example will enable the FIM in EOF mode (all other FIM controls are
+left at the default values):
+
+.. code-block:: none
+
+   v4l2-ctl -d4 --set-ctrl=fim_enable=1
+   # disable input capture method
+   v4l2-ctl -d4 --set-ctrl=fim_input_capture_edge=0
+   v4l2-ctl -d4 --stream-mmap
+
+This example will enable the FIM in Input Capture mode, with no skipped
+frames at stream on, an interval error tolerance of 20 usec, and no
+averaging. Note that the SabreAuto does not provide hardware support for
+this, so this example assumes the SabreAuto base-board has been modified
+to route the CSI0_VSYNC signal to the SD1_DAT0 pad which must function
+as GPT_CAPTURE1 via the device-tree:
+
+.. code-block:: none
+
+   v4l2-ctl -d4 --set-ctrl=fim_enable=1
+   # enable input capture method, on rising edges
+   v4l2-ctl -d4 --set-ctrl=fim_input_capture_edge=1
+   v4l2-ctl -d4 --set-ctrl=fim_input_capture_channel=0
+   v4l2-ctl -d4 --set-ctrl=fim_tolerance_min=20
+   v4l2-ctl -d4 --set-ctrl=fim_num_skip=0
+   v4l2-ctl -d4 --set-ctrl=fim_num_average=1
+   v4l2-ctl -d4 --stream-mmap
+
+While streaming, bad frame interval events can be polled with:
+
+.. code-block:: none
+
+   v4l2-ctl -d4 --wait-for-event=0x08000001
+
+
 
 SabreSD with MIPI CSI-2 OV5640
 ------------------------------
