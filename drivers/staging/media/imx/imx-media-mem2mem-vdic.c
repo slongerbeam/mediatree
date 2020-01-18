@@ -315,6 +315,9 @@ static int mem2mem_try_fmt(struct file *file, void *_priv,
 
 	imx_media_mbus_fmt_to_pix_fmt(&f->fmt.pix, &fmt.format, cc);
 
+	// HACK! to get around v4l2src field bugs -- delete this
+	f->fmt.pix.field = V4L2_FIELD_NONE;
+
 	return 0;
 }
 

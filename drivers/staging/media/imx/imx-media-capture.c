@@ -345,6 +345,9 @@ static int __capture_try_fmt_vid_cap(struct capture_priv *priv,
 		default:
 			break;
 		}
+	} else {
+		// HACK! to get around v4l2src field bugs -- delete this
+		fmt_src->format.field = V4L2_FIELD_NONE;
 	}
 
 	imx_media_mbus_fmt_to_pix_fmt(&f->fmt.pix, &fmt_src->format, cc);
