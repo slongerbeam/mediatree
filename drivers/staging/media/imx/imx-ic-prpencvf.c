@@ -54,9 +54,13 @@ struct prp_priv {
 	struct media_pad pad[PRPENCVF_NUM_PADS];
 	/* the video device at capture output pad */
 	struct imx_media_video_dev *vdev_cap;
+	/* the mem2mem device at mem2mem output pad */
+	struct imx_media_video_dev *vdev_m2m;
 	struct v4l2_format vdev_fmt;
 	struct v4l2_rect vdev_compose;
 	const struct imx_media_pixfmt *vdev_cc;
+	/* the job context for mem2mem */
+	void *job_ctx;
 
 	/* lock to protect all members below */
 	struct mutex lock;
@@ -203,13 +207,22 @@ out:
 static void prp_prepare_buffers(struct prp_priv *priv,
 				struct ipuv3_channel *ch, u32 buf_num)
 {
-	struct imx_media_video_dev *vdev = priv->vdev_cap;
 	struct imx_ic_priv *ic_priv = priv->ic_priv;
+	struct imx_media_video_dev *vdev;
 	struct vb2_v4l2_buffer *next;
 	dma_addr_t phys;
+	void *job_ctx;
+
+	if (priv->active_output_pad == PRPENCVF_SRC_PAD_CAPTURE) {
+		vdev = priv->vdev_cap;
+		job_ctx = NULL;
+	} else {
+		vdev = priv->vdev_m2m;
+		job_ctx = priv->job_ctx;
+	}
 
 	/* remove next queued buffer */
-	next = vdev->ops->remove_next_buf(vdev, NULL,
+	next = vdev->ops->remove_next_buf(vdev, job_ctx,
 					  V4L2_BUF_TYPE_VIDEO_CAPTURE);
 	if (next) {
 		phys = vb2_dma_contig_plane_dma_addr(&next->vb2_buf, 0);
@@ -235,9 +248,18 @@ static void prp_prepare_buffers(struct prp_priv *priv,
 static void prp_unprepare_buffers(struct prp_priv *priv,
 				  enum vb2_buffer_state return_status)
 {
-	struct imx_media_video_dev *vdev = priv->vdev_cap;
+	struct imx_media_video_dev *vdev;
 	struct vb2_v4l2_buffer *buf;
+	void *job_ctx;
 	int i;
+
+	if (priv->active_output_pad == PRPENCVF_SRC_PAD_CAPTURE) {
+		vdev = priv->vdev_cap;
+		job_ctx = NULL;
+	} else {
+		vdev = priv->vdev_m2m;
+		job_ctx = priv->job_ctx;
+	}
 
 	/* return any remaining active frames with return_status */
 	for (i = 0; i < 2; i++) {
@@ -245,15 +267,24 @@ static void prp_unprepare_buffers(struct prp_priv *priv,
 		if (!buf)
 			continue;
 
-		vdev->ops->buf_done(vdev, NULL, V4L2_BUF_TYPE_VIDEO_CAPTURE,
+		vdev->ops->buf_done(vdev, job_ctx, V4L2_BUF_TYPE_VIDEO_CAPTURE,
 				    buf, return_status);
 	}
 }
 
 static void prp_buffer_done(struct prp_priv *priv, struct ipuv3_channel *ch)
 {
-	struct imx_media_video_dev *vdev = priv->vdev_cap;
+	struct imx_media_video_dev *vdev;
 	struct vb2_v4l2_buffer *done;
+	void *job_ctx;
+
+	if (priv->active_output_pad == PRPENCVF_SRC_PAD_CAPTURE) {
+		vdev = priv->vdev_cap;
+		job_ctx = NULL;
+	} else {
+		vdev = priv->vdev_m2m;
+		job_ctx = priv->job_ctx;
+	}
 
 	done = priv->active_vb2_buf[priv->ipu_buf_num];
 
@@ -266,7 +297,7 @@ static void prp_buffer_done(struct prp_priv *priv, struct ipuv3_channel *ch)
 			VB2_BUF_STATE_ERROR : VB2_BUF_STATE_DONE;
 
 		done->sequence = priv->frame_sequence;
-		vdev->ops->buf_done(vdev, NULL,
+		vdev->ops->buf_done(vdev, job_ctx,
 				    V4L2_BUF_TYPE_VIDEO_CAPTURE,
 				    done, status);
 	}
@@ -336,15 +367,24 @@ static irqreturn_t prp_nfb4eof_interrupt(int irq, void *dev_id)
 static void prp_eof_timeout(struct timer_list *t)
 {
 	struct prp_priv *priv = from_timer(priv, t, eof_timeout_timer);
-	struct imx_media_video_dev *vdev = priv->vdev_cap;
 	struct imx_ic_priv *ic_priv = priv->ic_priv;
+	struct imx_media_video_dev *vdev;
+	void *job_ctx;
 
 	spin_lock(&priv->irqlock);
 
 	v4l2_err(&ic_priv->sd, "EOF timeout\n");
 
+	if (priv->active_output_pad == PRPENCVF_SRC_PAD_CAPTURE) {
+		vdev = priv->vdev_cap;
+		job_ctx = NULL;
+	} else {
+		vdev = priv->vdev_m2m;
+		job_ctx = priv->job_ctx;
+	}
+
 	/* signal a fatal error to capture device */
-	vdev->ops->device_error(vdev, NULL);
+	vdev->ops->device_error(vdev, job_ctx);
 
 	spin_unlock(&priv->irqlock);
 }
@@ -731,8 +771,11 @@ static void prp_wait_last_eof(struct prp_priv *priv)
 static int prp_stream_start(struct prp_priv *priv)
 {
 	struct imx_ic_priv *ic_priv = priv->ic_priv;
-	struct imx_media_video_dev *vdev = priv->vdev_cap;
+	struct imx_media_video_dev *vdev;
 	int ret;
+
+	vdev = priv->active_output_pad == PRPENCVF_SRC_PAD_CAPTURE ?
+		priv->vdev_cap : priv->vdev_m2m;
 
 	ret = prp_get_ipu_resources(priv);
 	if (ret)
@@ -796,7 +839,6 @@ static int prp_stream_start(struct prp_priv *priv)
 
 	/* start upstream */
 	ret = v4l2_subdev_call(priv->src_sd, video, s_stream, 1);
-	ret = (ret && ret != -ENOIOCTLCMD) ? ret : 0;
 	if (ret) {
 		v4l2_err(&ic_priv->sd,
 			 "upstream stream on failed: %d\n", ret);
@@ -833,7 +875,7 @@ static void prp_stream_stop(struct prp_priv *priv)
 
 	/* stop upstream */
 	ret = v4l2_subdev_call(priv->src_sd, video, s_stream, 0);
-	if (ret && ret != -ENOIOCTLCMD)
+	if (ret)
 		v4l2_warn(&ic_priv->sd,
 			  "upstream stream off failed: %d\n", ret);
 
@@ -1123,12 +1165,6 @@ static int prp_link_setup(struct media_entity *entity,
 
 	/* this is a source pad */
 
-	/* the source pad must be the capture pad for now */
-	if (local->index != PRPENCVF_SRC_PAD_CAPTURE) {
-		ret = -ENODEV;
-		goto out;
-	}
-
 	if (flags & MEDIA_LNK_FL_ENABLED) {
 		if (priv->sink) {
 			ret = -EBUSY;
@@ -1137,6 +1173,18 @@ static int prp_link_setup(struct media_entity *entity,
 	} else {
 		priv->sink = NULL;
 		goto out;
+	}
+
+	if (local->index == PRPENCVF_SRC_PAD_MEM2MEM) {
+		priv->vdev_m2m =
+			imx_media_mem2mem_vdic_get(local,
+						   ipu_get_num(ic_priv->ipu));
+		if (!priv->vdev_m2m) {
+			ret = -ENODEV;
+			goto out;
+		}
+	} else {
+		priv->vdev_m2m = NULL;
 	}
 
 	priv->sink = remote->entity;
@@ -1242,6 +1290,119 @@ static int prp_init_controls(struct prp_priv *priv)
 out_free:
 	v4l2_ctrl_handler_free(hdlr);
 	return ret;
+}
+
+static int prp_job_ready(struct prp_priv *priv, void *ctx)
+{
+	struct imx_media_video_dev *vdev = priv->vdev_m2m;
+	struct imx_ic_priv *ic_priv = priv->ic_priv;
+	int ret = 0;
+
+	mutex_lock(&priv->lock);
+
+	if (priv->active_output_pad != PRPENCVF_SRC_PAD_MEM2MEM)
+		goto out;
+
+	if (priv->job_ctx)
+		goto out;
+
+	ret = vdev->ops->bufs_ready(vdev, ctx, V4L2_BUF_TYPE_VIDEO_CAPTURE);
+	if (ret < 1)
+		goto out;
+
+	ret = v4l2_subdev_call(priv->src_sd, core, ioctl, IMX_CMD_JOB_READY,
+			       ctx);
+out:
+	dev_dbg(ic_priv->ipu_dev, "%s: %d\n", __func__, ret);
+	mutex_unlock(&priv->lock);
+	return ret;
+}
+
+static int prp_job_run(struct prp_priv *priv, void *ctx)
+{
+	struct imx_ic_priv *ic_priv = priv->ic_priv;
+	unsigned long flags;
+	int ret;
+
+	mutex_lock(&priv->lock);
+
+	if (priv->active_output_pad != PRPENCVF_SRC_PAD_MEM2MEM) {
+		ret = -EPIPE;
+		goto out;
+	}
+
+	spin_lock_irqsave(&priv->irqlock, flags);
+
+	if (priv->job_ctx) {
+		spin_unlock_irqrestore(&priv->irqlock, flags);
+		ret = -EBUSY;
+		goto out;
+	}
+
+	priv->job_ctx = ctx;
+
+	spin_unlock_irqrestore(&priv->irqlock, flags);
+
+	prp_start_pre_run(priv);
+
+	/* start job upstream */
+	ret = v4l2_subdev_call(priv->src_sd, core, ioctl, IMX_CMD_JOB_RUN,
+			       ctx);
+	if (ret) {
+		v4l2_err(&ic_priv->sd,
+			 "upstream device_run failed: %d\n", ret);
+		goto out_stop;
+	}
+
+	prp_start_post_run(priv);
+
+	mutex_unlock(&priv->lock);
+	return 0;
+
+out_stop:
+	prp_stop(priv, VB2_BUF_STATE_QUEUED);
+out:
+	mutex_unlock(&priv->lock);
+	return ret;
+}
+
+static int prp_job_done(struct prp_priv *priv, void *ctx)
+{
+	struct imx_ic_priv *ic_priv = priv->ic_priv;
+	int ret;
+
+	mutex_lock(&priv->lock);
+
+	prp_stop(priv, VB2_BUF_STATE_ERROR);
+	priv->job_ctx = NULL;
+
+	/* propagate job_done upstream */
+	ret = v4l2_subdev_call(priv->src_sd, core, ioctl, IMX_CMD_JOB_DONE,
+			       ctx);
+	if (ret)
+		v4l2_warn(&ic_priv->sd, "upstream job_done failed: %d\n",
+			  ret);
+
+	mutex_unlock(&priv->lock);
+
+	return 0;
+}
+
+static long prp_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)
+{
+	struct imx_ic_priv *ic_priv = v4l2_get_subdevdata(sd);
+	struct prp_priv *priv = ic_priv->task_priv;
+
+	switch (cmd) {
+	case IMX_CMD_JOB_READY:
+		return prp_job_ready(priv, arg);
+	case IMX_CMD_JOB_RUN:
+		return prp_job_run(priv, arg);
+	case IMX_CMD_JOB_DONE:
+		return prp_job_done(priv, arg);
+	default:
+		return -ENOIOCTLCMD;
+	}
 }
 
 static int prp_s_stream(struct v4l2_subdev *sd, int enable)
@@ -1393,7 +1554,12 @@ static const struct media_entity_operations prp_entity_ops = {
 	.link_validate = v4l2_subdev_link_validate,
 };
 
+static const struct v4l2_subdev_core_ops prp_core_ops = {
+	.ioctl = prp_ioctl,
+};
+
 static const struct v4l2_subdev_ops prp_subdev_ops = {
+	.core = &prp_core_ops,
 	.video = &prp_video_ops,
 	.pad = &prp_pad_ops,
 };
