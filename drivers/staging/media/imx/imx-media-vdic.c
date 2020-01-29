@@ -79,9 +79,13 @@ struct vdic_priv {
 	/* pipeline operations */
 	struct vdic_pipeline_ops *ops;
 
-	/* current and previous input buffers indirect path */
-	struct vb2_v4l2_buffer *curr_in_buf;
-	struct vb2_v4l2_buffer *prev_in_buf;
+	/* the three field buffers for indirect path */
+	struct vb2_v4l2_buffer *prev_field; /* F(n-1) */
+	struct vb2_v4l2_buffer *curr_field; /* F(n) */
+	struct vb2_v4l2_buffer *next_field; /* F(n+1) */
+
+	/* a blank field used by indirect path */
+	struct imx_media_dma_buf blank_field;
 
 	/*
 	 * translated field type, input line stride, and field size
@@ -104,6 +108,8 @@ struct vdic_priv {
 	struct imx_media_video_dev *vdev_src;
 	struct v4l2_format vdev_src_fmt;
 	struct v4l2_rect vdev_compose;
+	/* the job context for indirect (mem2mem) path */
+	void *job_ctx;
 
 	/* using direct CSI->VDIC->IC pipeline */
 	bool csi_direct;
@@ -205,27 +211,30 @@ static u32 vdic_get_top_field_position(u32 field)
 
 static void prepare_vdic_in_buffers(struct vdic_priv *priv)
 {
+	struct vb2_buffer *prev_vb, *curr_vb, *next_vb;
 	dma_addr_t prev_phys, curr_phys, next_phys;
-	struct vb2_buffer *curr_vb, *prev_vb;
 	u32 fs = priv->field_size;
 	u32 is = priv->in_stride;
 
-	prev_vb = &priv->prev_in_buf->vb2_buf;
-	curr_vb = &priv->curr_in_buf->vb2_buf;
+	prev_vb = priv->prev_field ? &priv->prev_field->vb2_buf : NULL;
+	curr_vb = priv->curr_field ? &priv->curr_field->vb2_buf : NULL;
+	next_vb = &priv->next_field->vb2_buf;
 
 	switch (priv->fieldtype) {
 	case V4L2_FIELD_SEQ_TB:
 	case V4L2_FIELD_SEQ_BT:
-		prev_phys = vb2_dma_contig_plane_dma_addr(prev_vb, 0) + fs;
-		curr_phys = vb2_dma_contig_plane_dma_addr(curr_vb, 0);
-		next_phys = vb2_dma_contig_plane_dma_addr(curr_vb, 0) + fs;
+		prev_phys = !prev_vb ? priv->blank_field.phys :
+			vb2_dma_contig_plane_dma_addr(prev_vb, 0) + fs;
+		curr_phys = vb2_dma_contig_plane_dma_addr(next_vb, 0);
+		next_phys = vb2_dma_contig_plane_dma_addr(next_vb, 0) + fs;
 		break;
 	case V4L2_FIELD_INTERLACED_TB:
 	case V4L2_FIELD_INTERLACED_BT:
 	case V4L2_FIELD_INTERLACED:
-		prev_phys = vb2_dma_contig_plane_dma_addr(prev_vb, 0) + is;
-		curr_phys = vb2_dma_contig_plane_dma_addr(curr_vb, 0);
-		next_phys = vb2_dma_contig_plane_dma_addr(curr_vb, 0) + is;
+		prev_phys = !prev_vb ? priv->blank_field.phys :
+			vb2_dma_contig_plane_dma_addr(prev_vb, 0) + is;
+		curr_phys = vb2_dma_contig_plane_dma_addr(next_vb, 0);
+		next_phys = vb2_dma_contig_plane_dma_addr(next_vb, 0) + is;
 		break;
 	default:
 		/*
@@ -320,8 +329,9 @@ static int vdic_setup_indirect(struct vdic_priv *priv)
 	priv->in_stride = incc->planar ?
 		infmt->width : (infmt->width * incc->bpp) >> 3;
 
-	priv->prev_in_buf = NULL;
-	priv->curr_in_buf = NULL;
+	priv->prev_field = NULL;
+	priv->curr_field = NULL;
+	priv->next_field = NULL;
 
 	priv->fieldtype = infmt->field;
 
@@ -329,12 +339,22 @@ static int vdic_setup_indirect(struct vdic_priv *priv)
 	ret = setup_vdic_in_channel(priv, priv->vdi_in_ch_p);
 	if (ret)
 		return ret;
-
 	ret = setup_vdic_in_channel(priv, priv->vdi_in_ch);
 	if (ret)
 		return ret;
+	ret = setup_vdic_in_channel(priv, priv->vdi_in_ch_n);
+	if (ret)
+		return ret;
 
-	return setup_vdic_in_channel(priv, priv->vdi_in_ch_n);
+	/* init the blank field buffer */
+	ret = imx_media_alloc_dma_buf(priv->ipu_dev, &priv->blank_field,
+				      priv->field_size);
+	if (ret)
+		return ret;
+
+	memset(priv->blank_field.virt, 0, priv->blank_field.len);
+
+	return 0;
 }
 
 static void vdic_start_indirect(struct vdic_priv *priv)
@@ -361,8 +381,26 @@ static void vdic_stop_indirect(struct vdic_priv *priv)
 
 static void vdic_disable_indirect(struct vdic_priv *priv)
 {
-	priv->prev_in_buf = NULL;
-	priv->curr_in_buf = NULL;
+	struct imx_media_video_dev *vdev_src = priv->vdev_src;
+
+	imx_media_free_dma_buf(priv->ipu_dev, &priv->blank_field);
+
+	if (priv->prev_field)
+		vdev_src->ops->buf_done(vdev_src, priv->job_ctx,
+					V4L2_BUF_TYPE_VIDEO_OUTPUT,
+					priv->prev_field,
+					VB2_BUF_STATE_ERROR);
+
+	if (priv->curr_field && priv->curr_field != priv->next_field)
+		vdev_src->ops->buf_done(vdev_src, priv->job_ctx,
+					V4L2_BUF_TYPE_VIDEO_OUTPUT,
+					priv->curr_field,
+					VB2_BUF_STATE_ERROR);
+
+	priv->prev_field = NULL;
+	priv->curr_field = NULL;
+	priv->next_field = NULL;
+	priv->job_ctx = NULL;
 }
 
 static struct vdic_pipeline_ops direct_ops = {
@@ -498,6 +536,106 @@ static int vdic_init_controls(struct vdic_priv *priv)
 out_free:
 	v4l2_ctrl_handler_free(hdlr);
 	return ret;
+}
+
+static int vdic_job_ready(struct vdic_priv *priv, void *ctx)
+{
+	struct imx_media_video_dev *vdev_src = priv->vdev_src;
+	int bufs_rdy = 0;
+
+	mutex_lock(&priv->lock);
+
+	if (priv->next_field)
+		goto out;
+
+	bufs_rdy = vdev_src->ops->bufs_ready(vdev_src, ctx,
+					     V4L2_BUF_TYPE_VIDEO_OUTPUT);
+out:
+	dev_dbg(priv->ipu_dev, "%s: %d\n", __func__, bufs_rdy >= 1);
+	mutex_unlock(&priv->lock);
+
+	return bufs_rdy >= 1;
+}
+
+static int vdic_job_run(struct vdic_priv *priv, void *ctx)
+{
+	struct imx_media_video_dev *vdev_src = priv->vdev_src;
+	int ret = 0;
+
+	mutex_lock(&priv->lock);
+
+	if (priv->next_field) {
+		ret = -EBUSY;
+		goto out;
+	}
+
+	priv->job_ctx = ctx;
+
+	priv->next_field =
+		vdev_src->ops->get_next_buf(vdev_src, priv->job_ctx,
+					    V4L2_BUF_TYPE_VIDEO_OUTPUT);
+
+	/* one buffer holds both F(n) and F(n+1) */
+	priv->curr_field = priv->next_field;
+
+	dev_dbg(priv->ipu_dev, "%s: prev %p, curr %p, next %p\n", __func__,
+		priv->prev_field, priv->curr_field, priv->next_field);
+
+	priv->ops->start(priv);
+out:
+	mutex_unlock(&priv->lock);
+	return ret;
+}
+
+static int vdic_job_done(struct vdic_priv *priv, void *ctx)
+{
+	struct imx_media_video_dev *vdev_src = priv->vdev_src;
+	struct vb2_v4l2_buffer *done;
+
+	mutex_lock(&priv->lock);
+
+	priv->ops->stop(priv);
+
+	done = vdev_src->ops->remove_next_buf(vdev_src, priv->job_ctx,
+					      V4L2_BUF_TYPE_VIDEO_OUTPUT);
+
+	WARN_ON(done != priv->next_field);
+
+	if (priv->prev_field)
+		vdev_src->ops->buf_done(vdev_src, priv->job_ctx,
+					V4L2_BUF_TYPE_VIDEO_OUTPUT,
+					priv->prev_field,
+					VB2_BUF_STATE_DONE);
+
+	/* F(n) is now (F(n-1) */
+	priv->prev_field = priv->curr_field;
+	/* F(n+1) is now (F(n) */
+	priv->curr_field = priv->next_field;
+	/* wait for new F(n+1) */
+	priv->next_field = NULL;
+
+	dev_dbg(priv->ipu_dev, "%s: prev %p, curr %p, next %p\n", __func__,
+		priv->prev_field, priv->curr_field, priv->next_field);
+
+	mutex_unlock(&priv->lock);
+
+	return 0;
+}
+
+static long vdic_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)
+{
+	struct vdic_priv *priv = v4l2_get_subdevdata(sd);
+
+	switch (cmd) {
+	case IMX_CMD_JOB_READY:
+		return vdic_job_ready(priv, arg);
+	case IMX_CMD_JOB_RUN:
+		return vdic_job_run(priv, arg);
+	case IMX_CMD_JOB_DONE:
+		return vdic_job_done(priv, arg);
+	default:
+		return -ENOIOCTLCMD;
+	}
 }
 
 static int vdic_s_stream(struct v4l2_subdev *sd, int enable)
@@ -745,6 +883,9 @@ static int vdic_link_setup(struct media_entity *entity,
 	}
 
 	if (local->index == VDIC_SINK_PAD_IDMAC) {
+		priv->vdev_src =
+			imx_media_mem2mem_vdic_get(local,
+						   ipu_get_num(priv->ipu));
 		if (!priv->vdev_src) {
 			ret = -ENODEV;
 			goto out;
@@ -887,8 +1028,6 @@ static int vdic_registered(struct v4l2_subdev *sd)
 		/* init default frame interval */
 		priv->frame_interval[i].numerator = 1;
 		priv->frame_interval[i].denominator = 30;
-		if (i == VDIC_SRC_PAD_DIRECT)
-			priv->frame_interval[i].denominator *= 2;
 	}
 
 	priv->active_input_pad = VDIC_SINK_PAD_DIRECT;
@@ -922,7 +1061,12 @@ static const struct media_entity_operations vdic_entity_ops = {
 	.link_validate = v4l2_subdev_link_validate,
 };
 
+static const struct v4l2_subdev_core_ops vdic_core_ops = {
+	.ioctl = vdic_ioctl,
+};
+
 static const struct v4l2_subdev_ops vdic_subdev_ops = {
+	.core = &vdic_core_ops,
 	.video = &vdic_video_ops,
 	.pad = &vdic_pad_ops,
 };
