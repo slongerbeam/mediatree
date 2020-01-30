@@ -221,6 +221,13 @@ static void prepare_vdic_in_buffers(struct vdic_priv *priv)
 	next_vb = &priv->next_field->vb2_buf;
 
 	switch (priv->fieldtype) {
+	case V4L2_FIELD_ALTERNATE:
+		prev_phys = !prev_vb ? priv->blank_field.phys :
+			vb2_dma_contig_plane_dma_addr(prev_vb, 0);
+		curr_phys = !curr_vb ? priv->blank_field.phys :
+			vb2_dma_contig_plane_dma_addr(curr_vb, 0);
+		next_phys = vb2_dma_contig_plane_dma_addr(next_vb, 0);
+		break;
 	case V4L2_FIELD_SEQ_TB:
 	case V4L2_FIELD_SEQ_BT:
 		prev_phys = !prev_vb ? priv->blank_field.phys :
@@ -266,8 +273,10 @@ static int setup_vdic_in_channel(struct vdic_priv *priv,
 	image.pix = priv->vdev_src_fmt.fmt.pix;
 	image.rect = priv->vdev_compose;
 	/* one field to VDIC channels */
-	image.pix.height /= 2;
-	image.rect.height /= 2;
+	if (priv->fieldtype != V4L2_FIELD_ALTERNATE) {
+		image.pix.height /= 2;
+		image.rect.height /= 2;
+	}
 
 	ret = ipu_cpmem_set_image(channel, &image);
 	if (ret)
@@ -294,6 +303,8 @@ static int vdic_setup_direct(struct vdic_priv *priv)
 
 static void vdic_start_direct(struct vdic_priv *priv)
 {
+	ipu_vdi_set_field_order(priv->vdi,
+				vdic_get_top_field_position(priv->fieldtype));
 	ipu_vdi_enable(priv->vdi);
 }
 
@@ -322,18 +333,19 @@ static int vdic_setup_indirect(struct vdic_priv *priv)
 	vdev_src->ops->get_fmt(vdev_src, &priv->vdev_src_fmt,
 			       &priv->vdev_compose, NULL);
 
+	priv->fieldtype = infmt->field;
+
 	in_size = (infmt->width * incc->bpp * infmt->height) >> 3;
 
 	/* 1/2 full image size */
-	priv->field_size = in_size / 2;
+	priv->field_size = (priv->fieldtype == V4L2_FIELD_ALTERNATE) ?
+		in_size : in_size / 2;
 	priv->in_stride = incc->planar ?
 		infmt->width : (infmt->width * incc->bpp) >> 3;
 
 	priv->prev_field = NULL;
 	priv->curr_field = NULL;
 	priv->next_field = NULL;
-
-	priv->fieldtype = infmt->field;
 
 	/* init the vdi-in channels */
 	ret = setup_vdic_in_channel(priv, priv->vdi_in_ch_p);
@@ -359,6 +371,11 @@ static int vdic_setup_indirect(struct vdic_priv *priv)
 
 static void vdic_start_indirect(struct vdic_priv *priv)
 {
+	u32 field = (priv->fieldtype == V4L2_FIELD_ALTERNATE) ?
+		priv->next_field->field : priv->fieldtype;
+
+	ipu_vdi_set_field_order(priv->vdi, vdic_get_top_field_position(field));
+
 	ipu_vdi_enable(priv->vdi);
 
 	prepare_vdic_in_buffers(priv);
@@ -419,10 +436,10 @@ static struct vdic_pipeline_ops indirect_ops = {
 
 static int vdic_start(struct vdic_priv *priv)
 {
-	struct v4l2_mbus_framefmt *infmt;
+	struct v4l2_mbus_framefmt *outfmt;
 	int ret;
 
-	infmt = &priv->format_mbus[priv->active_input_pad];
+	outfmt = &priv->format_mbus[VDIC_SRC_PAD_DIRECT];
 
 	priv->ops = priv->csi_direct ? &direct_ops : &indirect_ops;
 
@@ -433,14 +450,12 @@ static int vdic_start(struct vdic_priv *priv)
 	/*
 	 * init the VDIC.
 	 *
-	 * note we don't give infmt->code to ipu_vdi_setup(). The VDIC
+	 * note we don't give outfmt->code to ipu_vdi_setup(). The VDIC
 	 * only supports 4:2:2 or 4:2:0, and this subdev will only
 	 * negotiate 4:2:2 at its sink pads.
 	 */
 	ipu_vdi_setup(priv->vdi, MEDIA_BUS_FMT_UYVY8_2X8,
-		      infmt->width, infmt->height);
-	ipu_vdi_set_field_order(priv->vdi,
-				vdic_get_top_field_position(infmt->field));
+		      outfmt->width, outfmt->height);
 	ipu_vdi_set_motion(priv->vdi, priv->motion);
 
 	ret = priv->ops->setup(priv);
@@ -575,8 +590,9 @@ static int vdic_job_run(struct vdic_priv *priv, void *ctx)
 		vdev_src->ops->get_next_buf(vdev_src, priv->job_ctx,
 					    V4L2_BUF_TYPE_VIDEO_OUTPUT);
 
-	/* one buffer holds both F(n) and F(n+1) */
-	priv->curr_field = priv->next_field;
+	/* one buffer holds both F(n) and F(n+1) unless its alternate */
+	if (priv->fieldtype != V4L2_FIELD_ALTERNATE)
+		priv->curr_field = priv->next_field;
 
 	dev_dbg(priv->ipu_dev, "%s: prev %p, curr %p, next %p\n", __func__,
 		priv->prev_field, priv->curr_field, priv->next_field);
@@ -743,6 +759,26 @@ out:
 	return ret;
 }
 
+static void vdic_try_field(struct vdic_priv *priv,
+			   struct v4l2_subdev_format *sdformat)
+{
+	switch (sdformat->pad) {
+	case VDIC_SRC_PAD_DIRECT:
+		/* output is always progressive */
+		sdformat->format.field = V4L2_FIELD_NONE;
+		break;
+	case VDIC_SINK_PAD_DIRECT:
+		if (!V4L2_FIELD_HAS_BOTH(sdformat->format.field))
+			sdformat->format.field = V4L2_FIELD_SEQ_TB;
+		break;
+	case VDIC_SINK_PAD_IDMAC:
+		if (!V4L2_FIELD_HAS_BOTH(sdformat->format.field) &&
+		    sdformat->format.field != V4L2_FIELD_ALTERNATE)
+			sdformat->format.field = V4L2_FIELD_SEQ_TB;
+		break;
+	}
+}
+
 static void vdic_try_fmt(struct vdic_priv *priv,
 			 struct v4l2_subdev_pad_config *cfg,
 			 struct v4l2_subdev_format *sdformat,
@@ -766,8 +802,8 @@ static void vdic_try_fmt(struct vdic_priv *priv,
 	switch (sdformat->pad) {
 	case VDIC_SRC_PAD_DIRECT:
 		sdformat->format = *infmt;
-		/* output is always progressive! */
-		sdformat->format.field = V4L2_FIELD_NONE;
+		if (infmt->field == V4L2_FIELD_ALTERNATE)
+			sdformat->format.height *= 2;
 		break;
 	case VDIC_SINK_PAD_DIRECT:
 	case VDIC_SINK_PAD_IDMAC:
@@ -775,12 +811,10 @@ static void vdic_try_fmt(struct vdic_priv *priv,
 				      MIN_W, MAX_W_VDIC, W_ALIGN,
 				      &sdformat->format.height,
 				      MIN_H, MAX_H_VDIC, H_ALIGN, S_ALIGN);
-
-		/* input must be interlaced! Choose SEQ_TB if not */
-		if (!V4L2_FIELD_HAS_BOTH(sdformat->format.field))
-			sdformat->format.field = V4L2_FIELD_SEQ_TB;
 		break;
 	}
+
+	vdic_try_field(priv, sdformat);
 
 	imx_media_try_colorimetry(&sdformat->format, true);
 }
