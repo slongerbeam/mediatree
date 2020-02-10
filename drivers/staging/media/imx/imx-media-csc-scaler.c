@@ -831,6 +831,7 @@ static void ipu_csc_scaler_video_device_release(struct video_device *vdev)
 
 	v4l2_m2m_release(priv->m2m_dev);
 	video_device_release(vdev);
+	mutex_destroy(&priv->mutex);
 	kfree(priv);
 }
 
@@ -869,11 +870,7 @@ void imx_media_csc_scaler_device_unregister(struct imx_media_video_dev *vdev)
 	struct ipu_csc_scaler_priv *priv = vdev_to_priv(vdev);
 	struct video_device *vfd = priv->vdev.vfd;
 
-	mutex_lock(&priv->mutex);
-
 	video_unregister_device(vfd);
-
-	mutex_unlock(&priv->mutex);
 }
 
 struct imx_media_video_dev *
@@ -919,6 +916,7 @@ imx_media_csc_scaler_device_init(struct imx_media_dev *md)
 err_m2m:
 	video_set_drvdata(vfd, NULL);
 err_vfd:
+	mutex_destroy(&priv->mutex);
 	kfree(priv);
 	return ERR_PTR(ret);
 }
