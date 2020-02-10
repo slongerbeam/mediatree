@@ -859,16 +859,32 @@ int imx_media_csc_scaler_device_register(struct imx_media_video_dev *vdev)
 		return ret;
 	}
 
+	ret = v4l2_m2m_register_media_controller(priv->m2m_dev, vfd,
+						 MEDIA_ENT_F_PROC_VIDEO_SCALER);
+	if (ret) {
+		v4l2_err(&priv->md->v4l2_dev,
+			 "Failed to init mem2mem media controller: %d\n",
+			 ret);
+		goto err_reg;
+	}
+
+
 	v4l2_info(vfd->v4l2_dev, "Registered %s as /dev/%s\n", vfd->name,
 		  video_device_node_name(vfd));
 
 	return 0;
+
+err_reg:
+	video_unregister_device(vfd);
+	return ret;
 }
 
 void imx_media_csc_scaler_device_unregister(struct imx_media_video_dev *vdev)
 {
 	struct ipu_csc_scaler_priv *priv = vdev_to_priv(vdev);
 	struct video_device *vfd = priv->vdev.vfd;
+
+	v4l2_m2m_unregister_media_controller(priv->m2m_dev);
 
 	video_unregister_device(vfd);
 }
