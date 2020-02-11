@@ -16,6 +16,7 @@ Video4Linux (V4L) driver-specific documentation
 	davinci-vpbe
 	fimc
 	imx
+	imx-vdic-deinterlace
 	imx7
 	ipu3
 	ivtv
