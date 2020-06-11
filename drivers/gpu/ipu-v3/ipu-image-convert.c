@@ -448,10 +448,12 @@ static int calc_image_resize_coefficients(struct ipu_image_convert_ctx *ctx,
 #define round_closest(x, y) round_down((x) + (y)/2, (y))
 
 /*
- * Find the best aligned seam position for the given column / row index.
+ * Find the best aligned seam position in the inverval [out_start, out_end].
  * Rotation and image offsets are out of scope.
  *
- * @index: column / row index, used to calculate valid interval
+ * @out_start: start of inverval, must be within 1024 pixels / lines
+ *             of out_end
+ * @out_end: end of interval, smaller than or equal to out_edge
  * @in_edge: input right / bottom edge
  * @out_edge: output right / bottom edge
  * @in_align: input alignment, either horizontal 8-byte line start address
@@ -467,7 +469,8 @@ static int calc_image_resize_coefficients(struct ipu_image_convert_ctx *ctx,
  * @_out_seam: aligned output seam position return value
  */
 static void find_best_seam(struct ipu_image_convert_ctx *ctx,
-			   unsigned int index,
+			   unsigned int out_start,
+			   unsigned int out_end,
 			   unsigned int in_edge,
 			   unsigned int out_edge,
 			   unsigned int in_align,
@@ -485,13 +488,6 @@ static void find_best_seam(struct ipu_image_convert_ctx *ctx,
 	unsigned int out_seam = 0;
 	unsigned int in_seam = 0;
 	unsigned int min_diff = UINT_MAX;
-	unsigned int out_start;
-	unsigned int out_end;
-
-	/* Start within 1024 pixels of the right / bottom edge */
-	out_start = max_t(int, 0, out_edge - 1024);
-	/* End before having to add more columns to the left / rows above */
-	out_end = min_t(unsigned int, out_edge, index * 1024);
 
 	/*
 	 * Output tiles must start at a multiple of 8 bytes horizontally and
@@ -722,6 +718,8 @@ static void find_seams(struct ipu_image_convert_ctx *ctx,
 					  !(ctx->rot_mode & IPU_ROT_BIT_HFLIP);
 		bool allow_out_overshoot = (col < in->num_cols - 1) &&
 					   !(ctx->rot_mode & IPU_ROT_BIT_HFLIP);
+		unsigned int out_start;
+		unsigned int out_end;
 		unsigned int in_left;
 		unsigned int out_left;
 
@@ -730,7 +728,12 @@ static void find_seams(struct ipu_image_convert_ctx *ctx,
 		 * horizontally.
 		 */
 
-		find_best_seam(ctx, col,
+		/* Start within 1024 pixels of the right edge */
+		out_start = max_t(int, 0, out_right - 1024);
+		/* End before having to add more columns to the left */
+		out_end = min_t(unsigned int, out_right, col * 1024);
+
+		find_best_seam(ctx, out_start, out_end,
 			       in_right, out_right,
 			       in_left_align, out_left_align,
 			       allow_in_overshoot ? 1 : 8 /* burst length */,
@@ -765,10 +768,17 @@ static void find_seams(struct ipu_image_convert_ctx *ctx,
 
 	for (row = in->num_rows - 1; row > 0; row--) {
 		bool allow_overshoot = row < in->num_rows - 1;
+		unsigned int out_start;
+		unsigned int out_end;
 		unsigned int in_top;
 		unsigned int out_top;
 
-		find_best_seam(ctx, row,
+		/* Start within 1024 lines of the bottom edge */
+		out_start = max_t(int, 0, out_bottom - 1024);
+		/* End before having to add more rows above */
+		out_end = min_t(unsigned int, out_bottom, row * 1024);
+
+		find_best_seam(ctx, out_start, out_end,
 			       in_bottom, out_bottom,
 			       in_top_align, out_top_align,
 			       1, allow_overshoot ? 1 : out_height_align,
