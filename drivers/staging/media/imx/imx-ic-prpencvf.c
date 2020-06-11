@@ -452,7 +452,6 @@ static int prp_setup_rotation(struct prp_priv *priv)
 	const struct imx_media_pixfmt *outcc, *incc;
 	struct v4l2_mbus_framefmt *infmt;
 	struct v4l2_pix_format *outfmt;
-	struct ipu_ic_csc csc;
 	dma_addr_t phys[2];
 	int ret;
 
@@ -460,17 +459,6 @@ static int prp_setup_rotation(struct prp_priv *priv)
 	outfmt = &vdev->fmt.fmt.pix;
 	incc = priv->cc[PRPENCVF_SINK_PAD];
 	outcc = vdev->cc;
-
-	ret = ipu_ic_calc_csc(&csc,
-			      infmt->ycbcr_enc, infmt->quantization,
-			      incc->cs,
-			      outfmt->ycbcr_enc, outfmt->quantization,
-			      outcc->cs);
-	if (ret) {
-		v4l2_err(&ic_priv->sd, "ipu_ic_calc_csc failed, %d\n",
-			 ret);
-		return ret;
-	}
 
 	ret = imx_media_alloc_dma_buf(ic_priv->ipu_dev, &priv->rot_buf[0],
 				      outfmt->sizeimage);
@@ -485,9 +473,10 @@ static int prp_setup_rotation(struct prp_priv *priv)
 		goto free_rot0;
 	}
 
-	ret = ipu_ic_task_init(priv->ic, &csc,
+	ret = ipu_ic_task_init(priv->ic,
 			       infmt->width, infmt->height,
-			       outfmt->height, outfmt->width);
+			       outfmt->height, outfmt->width,
+			       incc->cs, outcc->cs);
 	if (ret) {
 		v4l2_err(&ic_priv->sd, "ipu_ic_task_init failed, %d\n", ret);
 		goto free_rot1;
@@ -581,7 +570,6 @@ static int prp_setup_norotation(struct prp_priv *priv)
 	const struct imx_media_pixfmt *outcc, *incc;
 	struct v4l2_mbus_framefmt *infmt;
 	struct v4l2_pix_format *outfmt;
-	struct ipu_ic_csc csc;
 	dma_addr_t phys[2];
 	int ret;
 
@@ -590,20 +578,10 @@ static int prp_setup_norotation(struct prp_priv *priv)
 	incc = priv->cc[PRPENCVF_SINK_PAD];
 	outcc = vdev->cc;
 
-	ret = ipu_ic_calc_csc(&csc,
-			      infmt->ycbcr_enc, infmt->quantization,
-			      incc->cs,
-			      outfmt->ycbcr_enc, outfmt->quantization,
-			      outcc->cs);
-	if (ret) {
-		v4l2_err(&ic_priv->sd, "ipu_ic_calc_csc failed, %d\n",
-			 ret);
-		return ret;
-	}
-
-	ret = ipu_ic_task_init(priv->ic, &csc,
+	ret = ipu_ic_task_init(priv->ic,
 			       infmt->width, infmt->height,
-			       outfmt->width, outfmt->height);
+			       outfmt->width, outfmt->height,
+			       incc->cs, outcc->cs);
 	if (ret) {
 		v4l2_err(&ic_priv->sd, "ipu_ic_task_init failed, %d\n", ret);
 		return ret;
